@@ -12,17 +12,28 @@ local _, ns = ...
 -- Blizzard pools the inner unit frames (base.UnitFrame) and gives them to any plate, friendly
 -- ones too, so a unit frame we've made see-through gets its opacity back when it's next used
 -- for something friendly.
+--
+-- Extras round the bar, each its own setting: casts you can't interrupt in their own colour with
+-- a small shield (following Blizzard's cast bar, which knows even when the game keeps it secret);
+-- the bar in the execute colour once the enemy is in range of your class's execute (worked out
+-- by the game from the health, so it works while that's secret); gold and silver dragons round
+-- elite and rare plates; and a "!" before the name of enemies your quests still need.
 
 local Plates = {}
 ns.Plates = Plates
 
-local issecret = issecretvalue or function() return false end
-local function Safe(v)
-    if issecret(v) then return nil end
-    return v
-end
+local issecret, Safe = FrogLib.issecret, FrogLib.Safe
+local Borders, Threat = FrogLib.Borders, FrogLib.Threat
 
 local WHITE = "Interface\\Buttons\\WHITE8X8"
+local MEDIA = "Interface\\AddOns\\FrogPlates\\Media\\"
+local QUEST_ICON = "Interface\\GossipFrame\\AvailableQuestIcon" -- the yellow "!"
+
+-- The dragons (Media\Dragon*.tga, 128x128 texels, cut from the classic target frame's art by
+-- _tools\make_dragon_art.py): where the portrait's hole is in them, which goes round the bar's
+-- end, and how far right the art reaches.
+local DRAGON = { size = 128, holeX = 51.5, holeY = 58.5, holeR = 27.5, right = 125 }
+local DRAGON_ART = { elite = "DragonElite", worldboss = "DragonElite", rare = "DragonRare", rareelite = "DragonRareElite" }
 local own = {}    -- Blizzard unit frames we've made see-through
 local frames = {} -- plate base -> our frame
 local byUnit = {} -- nameplate unit token -> our frame
@@ -43,10 +54,7 @@ local function Texture()
     return Usable(ns.db.texture) and ns.db.texture or WHITE
 end
 
--- One screen pixel in `frame`'s units.
-local function Pixel(frame)
-    return 768 / select(2, GetPhysicalScreenSize()) / frame:GetEffectiveScale()
-end
+local Pixel = FrogLib.Pixel
 
 ------------------------------------------------------------------------------
 -- Colour: threat first (when you're on its threat list), then tapped, players' class, reaction.
@@ -98,8 +106,82 @@ local function Colour(unit)
 end
 
 ------------------------------------------------------------------------------
+-- Execute range: the bar in the execute colour once the enemy is low enough for your class's
+-- execute, if you know it (any rank) and, for warriors, are in a stance that can use it.
+------------------------------------------------------------------------------
+
+local EXECUTES = {
+    -- Execute, in Battle Stance (form 17, or the first stance) or Berserker Stance (19, the third).
+    WARRIOR = { spells = { 5308, 20658, 20660, 20661, 20662 }, below = 0.2,
+        forms = { [17] = true, [19] = true }, stances = { [1] = true, [3] = true } },
+    -- Hammer of Wrath.
+    PALADIN = { spells = { 24275, 24274, 24239 }, below = 0.2 },
+}
+
+local KNOWS = {} -- the ways this game has of asking whether you know a spell
+if C_SpellBook and C_SpellBook.IsSpellKnown then KNOWS[#KNOWS + 1] = C_SpellBook.IsSpellKnown end
+if IsPlayerSpell then KNOWS[#KNOWS + 1] = IsPlayerSpell end
+if IsSpellKnown then KNOWS[#KNOWS + 1] = IsSpellKnown end
+
+local function Knows(id)
+    for _, check in ipairs(KNOWS) do
+        local ok, known = pcall(check, id)
+        if ok and Safe(known) == true then return true end
+    end
+    return false
+end
+
+local executeBelow = false -- the health fraction your execute works under, or false (ExecuteCheck)
+
+function Plates:ExecuteCheck()
+    local _, class = UnitClass("player")
+    local e = EXECUTES[class]
+    local usable = false
+    if e then
+        for _, id in ipairs(e.spells) do
+            if Knows(id) then
+                usable = true
+                break
+            end
+        end
+        if usable and e.forms then
+            local form = GetShapeshiftFormID and GetShapeshiftFormID()
+            if form then
+                usable = e.forms[form] or false
+            else
+                local index = GetShapeshiftForm and GetShapeshiftForm()
+                usable = (index and e.stances[index]) or false
+            end
+        end
+    end
+    executeBelow = usable and e.below or false
+end
+
+-- 1 under the line and 0 from it up, for the overlay's opacity. The game evaluates it against the
+-- health fraction (UnitHealthPercent), so the answer may be secret, which SetAlpha takes.
+local curves = {}
+local function ExecuteCurve(below)
+    if curves[below] ~= nil then return curves[below] end
+    local curve = false
+    if UnitHealthPercent and C_CurveUtil and C_CurveUtil.CreateCurve then
+        local ok, c = pcall(C_CurveUtil.CreateCurve)
+        if ok and c then
+            if Enum.LuaCurveType and c.SetType then pcall(c.SetType, c, Enum.LuaCurveType.Step) end
+            -- A pair of points either side of the line, so it's sharp however steps are taken.
+            c:AddPoint(0, 1)
+            c:AddPoint(below - 0.0001, 1)
+            c:AddPoint(below, 0)
+            c:AddPoint(1, 0)
+            curve = c
+        end
+    end
+    curves[below] = curve
+    return curve
+end
+
+------------------------------------------------------------------------------
 -- Threat gap: your lead over the next highest on its threat list (or how far behind you are),
--- the same as EnmityList's.
+-- worked out by FrogLib's Threat.Gap, as EnmityList's is.
 ------------------------------------------------------------------------------
 
 local function Short(n)
@@ -109,157 +191,77 @@ local function Short(n)
     return tostring(math.floor(n + 0.5))
 end
 
-local function ThreatGap(unit)
-    local _, _, _, _, mine = UnitDetailedThreatSituation("player", unit)
-    if mine == nil or issecret(mine) then return nil end
-    local best
-    local function Consider(who)
-        if not UnitExists(who) or Safe(UnitIsUnit(who, "player")) ~= false then return end
-        local _, _, _, _, v = UnitDetailedThreatSituation(who, unit)
-        if v ~= nil and not issecret(v) and v > 0 and (not best or v > best) then best = v end
-    end
-    Consider("pet")
-    if IsInRaid() then
-        for i = 1, GetNumGroupMembers() do
-            Consider("raid" .. i)
-            Consider("raidpet" .. i)
-        end
-    else
-        for i = 1, 4 do
-            Consider("party" .. i)
-            Consider("partypet" .. i)
-        end
-    end
-    return best and (mine - best) or nil
-end
-
 ------------------------------------------------------------------------------
 -- Our frame
 ------------------------------------------------------------------------------
-
--- Four edges round `bar`, `size` pixels thick, outside it.
-local function Border(frame, bar, layer)
-    local b = { frame = frame, bar = bar }
-    for _, key in ipairs({ "top", "bottom", "left", "right" }) do
-        local t = frame:CreateTexture(nil, layer or "BORDER")
-        if t.SetSnapToPixelGrid then
-            t:SetSnapToPixelGrid(false)
-            t:SetTexelSnappingBias(0)
-        end
-        b[key] = t
-    end
-    return b
-end
-
--- `size` pixels thick, starting `out` pixels outside the bar.
-local function PlaceBorder(b, size, out, c)
-    local p = Pixel(b.frame)
-    local t, o = p * size, p * out
-    local bar = b.bar
-    b.top:ClearAllPoints()
-    b.top:SetPoint("BOTTOMLEFT", bar, "TOPLEFT", -(o + t), o)
-    b.top:SetPoint("BOTTOMRIGHT", bar, "TOPRIGHT", o + t, o)
-    b.top:SetHeight(t)
-    b.bottom:ClearAllPoints()
-    b.bottom:SetPoint("TOPLEFT", bar, "BOTTOMLEFT", -(o + t), -o)
-    b.bottom:SetPoint("TOPRIGHT", bar, "BOTTOMRIGHT", o + t, -o)
-    b.bottom:SetHeight(t)
-    b.left:ClearAllPoints()
-    b.left:SetPoint("TOPRIGHT", bar, "TOPLEFT", -o, o)
-    b.left:SetPoint("BOTTOMRIGHT", bar, "BOTTOMLEFT", -o, -o)
-    b.left:SetWidth(t)
-    b.right:ClearAllPoints()
-    b.right:SetPoint("TOPLEFT", bar, "TOPRIGHT", o, o)
-    b.right:SetPoint("BOTTOMLEFT", bar, "BOTTOMRIGHT", o, -o)
-    b.right:SetWidth(t)
-    for _, key in ipairs({ "top", "bottom", "left", "right" }) do b[key]:SetColorTexture(c.r, c.g, c.b, c.a or 1) end
-end
-
--- The Forever frame: our own (Media\ForeverFrame.tga, 16x16), in the style of Forever's bar
--- frames: a dark outline, a light metallic rim brighter along the top, and a dark inner line,
--- each one screen pixel wide, with the corners cut. Nine-sliced at one texel per screen pixel, so
--- it's crisp at any bar size and nothing stretches but its straight edges. It sits 2 pixels out
--- from the bar, its inner line over the fill's edge, so the fill sits inside it.
-local FRAME_FILE = "Interface\\AddOns\\FrogPlates\\Media\\ForeverFrame.tga"
-local FRAME_SIZE, FRAME_SLICE, FRAME_OUT = 16, 3, 2
-local FRAME_KEYS = { "tl", "t", "tr", "l", "r", "bl", "b", "br" }
-
-local function FrameArt(bar)
-    local p = {}
-    for _, key in ipairs(FRAME_KEYS) do
-        local t = bar:CreateTexture(nil, "OVERLAY", nil, 5)
-        t:SetTexture(FRAME_FILE, nil, nil, "NEAREST")
-        if t.SetSnapToPixelGrid then
-            t:SetSnapToPixelGrid(false)
-            t:SetTexelSnappingBias(0)
-        end
-        p[key] = t
-    end
-    return p
-end
-
--- thickness: screen pixels per texel (1 to 3), a whole number so it stays crisp.
-local function PlaceFrameArt(p, bar, thickness)
-    local px = (thickness or 1) * 768 / select(2, GetPhysicalScreenSize()) / bar:GetEffectiveScale()
-    local m, out = FRAME_SLICE * px, FRAME_OUT * px
-    local a, b = FRAME_SLICE / FRAME_SIZE, (FRAME_SIZE - FRAME_SLICE) / FRAME_SIZE
-    p.tl:SetTexCoord(0, a, 0, a)
-    p.t:SetTexCoord(a, b, 0, a)
-    p.tr:SetTexCoord(b, 1, 0, a)
-    p.l:SetTexCoord(0, a, a, b)
-    p.r:SetTexCoord(b, 1, a, b)
-    p.bl:SetTexCoord(0, a, b, 1)
-    p.b:SetTexCoord(a, b, b, 1)
-    p.br:SetTexCoord(b, 1, b, 1)
-    for _, t in pairs(p) do t:ClearAllPoints() end
-    p.tl:SetPoint("TOPLEFT", bar, "TOPLEFT", -out, out)
-    p.tr:SetPoint("TOPRIGHT", bar, "TOPRIGHT", out, out)
-    p.bl:SetPoint("BOTTOMLEFT", bar, "BOTTOMLEFT", -out, -out)
-    p.br:SetPoint("BOTTOMRIGHT", bar, "BOTTOMRIGHT", out, -out)
-    for _, key in ipairs({ "tl", "tr", "bl", "br" }) do p[key]:SetSize(m, m) end
-    p.t:SetPoint("TOPLEFT", p.tl, "TOPRIGHT")
-    p.t:SetPoint("BOTTOMRIGHT", p.tr, "BOTTOMLEFT")
-    p.b:SetPoint("TOPLEFT", p.bl, "TOPRIGHT")
-    p.b:SetPoint("BOTTOMRIGHT", p.br, "BOTTOMLEFT")
-    p.l:SetPoint("TOPLEFT", p.tl, "BOTTOMLEFT")
-    p.l:SetPoint("BOTTOMRIGHT", p.bl, "TOPRIGHT")
-    p.r:SetPoint("TOPLEFT", p.tr, "BOTTOMLEFT")
-    p.r:SetPoint("BOTTOMRIGHT", p.br, "TOPRIGHT")
-end
-
--- The classic look's border: the grey stone tooltips and old frames use.
-local STONE = "Interface\\Tooltips\\UI-Tooltip-Border"
-
-local function ShowBorder(b, shown)
-    for _, key in ipairs({ "top", "bottom", "left", "right" }) do b[key]:SetShown(shown) end
-end
 
 local function Create(base)
     local f = CreateFrame("Frame", nil, base)
     f:SetAllPoints(base)
     f.base = base
 
+    -- Where the bar goes: centred on the plate at the health bar's height (see Layout).
+    f.slot = CreateFrame("Frame", nil, f)
     local bar = CreateFrame("StatusBar", nil, f)
+    bar:SetStatusBarTexture(WHITE)
     bar:SetMinMaxValues(0, 1)
     bar:SetValue(1)
     f.bar = bar
     f.bg = bar:CreateTexture(nil, "BACKGROUND")
     f.bg:SetAllPoints()
     f.bg:SetColorTexture(0.06, 0.06, 0.07, 0.85)
+    -- Execute range: the fill again in the execute colour, over it (see UpdateExecute).
+    f.execute = bar:CreateTexture(nil, "ARTWORK", nil, 2)
+    f.execute:SetAllPoints(bar:GetStatusBarTexture())
+    f.execute:Hide()
     -- The border, in one of three styles (ns.db.borderStyle): a pixel edge, the classic stone,
     -- or our Forever frame.
-    f.border = Border(f, bar, "BORDER")
-    f.stone = CreateFrame("Frame", nil, bar, "BackdropTemplate")
-    f.stone:SetFrameLevel(bar:GetFrameLevel() + 1)
-    f.frameArt = FrameArt(bar)
+    f.border = Borders.Edges(f, bar, "BORDER")
+    f.stone = Borders.Stone(bar, 1)
+    f.frameArt = Borders.Forever(bar)
+    -- Elite and rare: a dragon round the bar's right end (and a mirrored one round its left, if
+    -- set), over the borders but under the text.
+    f.dragons = CreateFrame("Frame", nil, f)
+    f.dragons:SetAllPoints(bar)
+    f.dragons:SetFrameLevel(bar:GetFrameLevel() + 2)
+    f.dragonRight = f.dragons:CreateTexture(nil, "ARTWORK")
+    f.dragonLeft = f.dragons:CreateTexture(nil, "ARTWORK")
+    f.dragonLeft:SetTexCoord(1, 0, 0, 1)
+    f.dragons:Hide()
     -- Your target: a second, coloured ring round the black one.
     f.ring = CreateFrame("Frame", nil, f)
     f.ring:SetAllPoints(bar)
-    f.ringBorder = Border(f.ring, bar, "OVERLAY")
+    f.ringBorder = Borders.Edges(f.ring, bar, "OVERLAY")
+    -- Or arrows either side ("> bar <"), gently pointing in, and a soft glow behind the bar.
+    f.glow = f:CreateTexture(nil, "BACKGROUND", nil, -8)
+    f.glow:SetTexture(MEDIA .. "Glow.tga")
+    -- Nine-sliced where the game can, so the glow keeps its width on long bars.
+    if f.glow.SetTextureSliceMargins then
+        pcall(f.glow.SetTextureSliceMargins, f.glow, 16, 16, 16, 16)
+        if Enum.UITextureSliceMode then pcall(f.glow.SetTextureSliceMode, f.glow, Enum.UITextureSliceMode.Stretched) end
+    end
+    f.glow:SetBlendMode("ADD")
+    f.glow:Hide()
+    f.arrows = CreateFrame("Frame", nil, f)
+    f.arrows:SetAllPoints(bar)
+    f.arrowLeft = f.arrows:CreateTexture(nil, "OVERLAY")
+    f.arrowLeft:SetTexture(MEDIA .. "Arrow.tga")
+    f.arrowRight = f.arrows:CreateTexture(nil, "OVERLAY")
+    f.arrowRight:SetTexture(MEDIA .. "Arrow.tga")
+    f.arrowRight:SetTexCoord(1, 0, 0, 1) -- "<"
+    local bounce = f.arrows:CreateAnimationGroup()
+    bounce:SetLooping("BOUNCE")
+    local nudge = bounce:CreateAnimation("Alpha")
+    nudge:SetFromAlpha(1)
+    nudge:SetToAlpha(0.55)
+    nudge:SetDuration(0.7)
+    nudge:SetSmoothing("IN_OUT")
+    f.arrows.pulse = bounce
+    f.arrows:Hide()
 
     local text = CreateFrame("Frame", nil, bar)
     text:SetAllPoints()
-    text:SetFrameLevel(bar:GetFrameLevel() + 2)
+    text:SetFrameLevel(bar:GetFrameLevel() + 3)
     f.name = text:CreateFontString(nil, "OVERLAY")
     f.name:SetPoint("BOTTOMLEFT", bar, "TOPLEFT", 0, 3)
     f.name:SetPoint("BOTTOMRIGHT", bar, "TOPRIGHT", 0, 3)
@@ -282,11 +284,16 @@ local function Create(base)
     f.threat = text:CreateFontString(nil, "OVERLAY")
     f.threat:SetPoint("LEFT", bar, "RIGHT", 4, 0)
     f.threat:SetShadowOffset(1, -1)
-    f.mark = text:CreateTexture(nil, "OVERLAY")
-    f.mark:SetSize(16, 16)
+    -- The raid mark: an icon written into text (see UpdateMark), since which mark it is can be
+    -- secret in combat.
+    f.mark = text:CreateFontString(nil, "OVERLAY")
+    f.mark:SetFont(STANDARD_TEXT_FONT, 12, "")
     f.mark:SetPoint("RIGHT", bar, "LEFT", -4, 0)
-    f.mark:SetTexture("Interface\\TargetingFrame\\UI-RaidTargetingIcons")
     f.mark:Hide()
+    -- Wanted by your quests: a "!" before the name (see UpdateQuest).
+    f.quest = text:CreateTexture(nil, "OVERLAY")
+    f.quest:SetTexture(QUEST_ICON)
+    f.quest:Hide()
 
     -- A black shadow under all the text (all there is with the outline set to "None").
     for _, fs in ipairs({ f.name, f.threat, f.texts.left, f.texts.center, f.texts.right }) do
@@ -307,27 +314,155 @@ local function BlizzardBar(uf)
     return uf and ((uf.HealthBarsContainer and uf.HealthBarsContainer.healthBar) or uf.healthBar)
 end
 
+local function BlizzardCast(uf)
+    return uf and uf.CastBarsContainer and uf.CastBarsContainer.castBar
+end
+
+------------------------------------------------------------------------------
+-- Casts you can't interrupt. Blizzard's cast bar already knows (the cast's notInterruptible,
+-- secret for enemies in combat) and shows or hides its own shield to match (UpdateIconShown).
+-- We follow that shield, handing what it's given straight to SetAlphaFromBoolean, which takes
+-- secrets: our fill over Blizzard's, in the uninterruptible colour, and our small shield beside
+-- the bar. Blizzard's shield is hidden on our plates (its art doesn't fit our bar).
+------------------------------------------------------------------------------
+
+local casts = {} -- Blizzard cast bar -> our parts on it: fill, shield, and the last shield state
+
+local function CastParts(cast)
+    local x = casts[cast]
+    if x then return x end
+    x = {}
+    x.fill = cast:CreateTexture(nil, "ARTWORK", nil, 7)
+    x.fill:SetAlpha(0)
+    x.shield = cast:CreateTexture(nil, "OVERLAY", nil, 7)
+    x.shield:SetTexture(MEDIA .. "Shield.tga")
+    x.shield:SetAlpha(0)
+    casts[cast] = x
+    return x
+end
+
+-- A texture over a status bar's fill exactly (shrinking and growing with it). It stays on the top
+-- sublevel of ARTWORK, where CastParts made it: the fill's own draw layer can be secret on enemy
+-- cast bars, so it isn't read.
+local function OverFill(region, bar)
+    local tex = bar:GetStatusBarTexture()
+    if not tex then return end
+    region:ClearAllPoints()
+    region:SetAllPoints(tex)
+end
+
+-- Fully shown when `shown` (which may be secret) is true, hidden when it's false: the game's
+-- defaults for SetAlphaFromBoolean.
+local function AlphaFrom(region, shown, on)
+    if not on then
+        region:SetAlpha(0)
+    elseif region.SetAlphaFromBoolean then
+        region:SetAlphaFromBoolean(shown)
+    elseif not issecret(shown) then
+        region:SetAlpha(shown and 1 or 0)
+    else
+        region:SetAlpha(0)
+    end
+end
+
+function Plates:CastShield(uf, cast, shown)
+    local x = CastParts(cast)
+    if not issecret(shown) then shown = shown and true or false end
+    x.last, x.seen = shown, true
+    local db = ns.db
+    local on = own[uf] and db.enabled and db.castBar
+    if cast.BorderShield then cast.BorderShield:SetAlpha(on and 0 or 1) end
+    AlphaFrom(x.fill, shown, on and db.castColor)
+    AlphaFrom(x.shield, shown, on and db.castShield)
+end
+
+-- Once per cast bar (they come with the pooled unit frames).
+local function HookCast(uf)
+    local cast = BlizzardCast(uf)
+    if not cast then return end
+    local x = CastParts(cast)
+    if x.hooked then return end
+    x.hooked = true
+    if cast.BorderShield and type(cast.BorderShield.SetShown) == "function" then
+        hooksecurefunc(cast.BorderShield, "SetShown", function(_, shown) Plates:CastShield(uf, cast, shown) end)
+    end
+    -- Blizzard may swap its fill texture as the cast changes state.
+    if type(cast.UpdateBarFillTexture) == "function" then
+        hooksecurefunc(cast, "UpdateBarFillTexture", function() OverFill(x.fill, cast) end)
+    end
+    -- An interrupted cast turns red, which ours mustn't cover; the next cast sets it again.
+    if type(cast.PlayInterruptAnims) == "function" then
+        hooksecurefunc(cast, "PlayInterruptAnims", function() x.fill:SetAlpha(0) end)
+    end
+end
+
 -- The black edge, and your target's ring in the target colour just outside it. Sized in screen
 -- pixels, so placed again whenever the plate's scale changes (it grows as enemies come closer).
 function Plates:PlaceBorders(f)
     local db = ns.db
     local style = db.borderStyle
     f.placedScale = f:GetEffectiveScale()
-    PlaceBorder(f.border, 1, 0, { r = 0, g = 0, b = 0 })
-    ShowBorder(f.border, style == "pixel")
-    if style == "classic" then
-        f.stone:ClearAllPoints()
-        f.stone:SetPoint("TOPLEFT", f.bar, "TOPLEFT", -3, 3)
-        f.stone:SetPoint("BOTTOMRIGHT", f.bar, "BOTTOMRIGHT", 3, -3)
-        f.stone:SetBackdrop({ edgeFile = STONE, edgeSize = 12 })
-        f.stone:SetBackdropBorderColor(0.75, 0.75, 0.75, 1)
-    end
+    f.border:Place(1, 0, { r = 0, g = 0, b = 0 })
+    f.border:SetShown(style == "pixel")
     f.stone:SetShown(style == "classic")
-    if style == "forever" then PlaceFrameArt(f.frameArt, f.bar, db.frameThickness) end
-    for _, t in pairs(f.frameArt) do t:SetShown(style == "forever") end
+    if style == "forever" then f.frameArt:Place(db.frameThickness) end
+    f.frameArt:SetShown(style == "forever")
     -- The target ring goes just outside whichever border it is.
     local out = (style == "classic" and 3) or (style == "forever" and 2 * (db.frameThickness or 1)) or 1
-    PlaceBorder(f.ringBorder, 1, out, db.colors.target)
+    f.ringBorder:Place(1, out, db.colors.target)
+    local c = db.colors.target
+    -- Arrows: a little taller than the bar, half as wide as tall, just clear of the border.
+    local ah = db.height + 8
+    local gap = out + 4
+    for _, a in ipairs({ f.arrowLeft, f.arrowRight }) do
+        a:SetSize(ah / 2, ah)
+        a:SetVertexColor(c.r, c.g, c.b)
+    end
+    -- The glow: 10 out from the bar all round.
+    f.glow:ClearAllPoints()
+    f.glow:SetPoint("TOPLEFT", f.bar, "TOPLEFT", -10, 10)
+    f.glow:SetPoint("BOTTOMRIGHT", f.bar, "BOTTOMRIGHT", 10, -10)
+    f.glow:SetVertexColor(c.r, c.g, c.b, 0.55)
+    -- The raid mark and threat text move out past the arrows when they show.
+    f.arrowGap = gap
+    f.arrowRoom = gap + ah / 2
+    self:PlaceSides(f)
+end
+
+-- What sits beside the bar (arrows, raid mark, threat text) keeps clear of the dragons, and the
+-- raid mark and threat text of the arrows too.
+function Plates:PlaceSides(f)
+    local reach = f.hasDragon and f.dragonReach or 0
+    local right, left = reach, ns.db.dragons.both and reach or 0
+    local gap = f.arrowGap or 5
+    f.arrowLeft:ClearAllPoints()
+    f.arrowLeft:SetPoint("RIGHT", f.bar, "LEFT", -gap - left, 0)
+    f.arrowRight:ClearAllPoints()
+    f.arrowRight:SetPoint("LEFT", f.bar, "RIGHT", gap + right, 0)
+    local room = f.arrows:IsShown() and (f.arrowRoom or 0) or 0
+    f.mark:ClearAllPoints()
+    f.mark:SetPoint("RIGHT", f.bar, "LEFT", -4 - left - room, 0)
+    f.threat:ClearAllPoints()
+    f.threat:SetPoint("LEFT", f.bar, "RIGHT", 4 + right + room, 0)
+end
+
+-- The dragons: the hole in the art (see DRAGON) a little taller than the bar, its middle just
+-- inside the bar's end, so the head sits over the bar and the tail curls under it. Sized from the
+-- bar's height (in plate units, so they scale with the plate).
+function Plates:PlaceDragons(f)
+    local db = ns.db
+    local s = (db.height + 12) / (2 * DRAGON.holeR) * (db.dragons.size or 1) -- per texel
+    local inset = 2 * s
+    local dx, dy = (DRAGON.size / 2 - DRAGON.holeX) * s, (DRAGON.size / 2 - DRAGON.holeY) * s
+    local size = DRAGON.size * s
+    f.dragonRight:ClearAllPoints()
+    f.dragonRight:SetPoint("CENTER", f.bar, "RIGHT", dx - inset, -dy)
+    f.dragonRight:SetSize(size, size)
+    f.dragonLeft:ClearAllPoints()
+    f.dragonLeft:SetPoint("CENTER", f.bar, "LEFT", inset - dx, -dy)
+    f.dragonLeft:SetSize(size, size)
+    -- How far past the bar's end they reach.
+    f.dragonReach = (DRAGON.right - DRAGON.holeX) * s - inset
 end
 
 function Plates:Layout(f)
@@ -335,18 +470,39 @@ function Plates:Layout(f)
     local anchor = BlizzardBar(uf) or f.base
     local bar = f.bar
     bar:ClearAllPoints()
+    -- Centred on the plate (which the game keeps over the enemy), at the height of Blizzard's bar.
+    -- That bar starts at the plate's left but stops short on the right, for the level badge, and
+    -- nameplates can't be measured; so a slot is anchored from its top left to the top right of
+    -- the cast bar area below it (the plate's full width, evenly inset), raised by the gap
+    -- between the two: the plate's width at the health bar's height.
+    local hc, cc = uf and uf.HealthBarsContainer, uf and uf.CastBarsContainer
+    local slot = f.slot
+    slot:ClearAllPoints()
+    if hc and cc then
+        local gap = NamePlateSetupOptions and NamePlateSetupOptions.castBarToHealthBarSpacing or 0
+        slot:SetPoint("TOPLEFT", hc, "TOPLEFT")
+        slot:SetPoint("BOTTOMRIGHT", cc, "TOPRIGHT", 0, gap)
+    else
+        slot:SetAllPoints(anchor)
+    end
     if db.width > 0 then
-        bar:SetPoint("CENTER", anchor, "CENTER", 0, 0)
+        bar:SetPoint("CENTER", slot, "CENTER")
         bar:SetWidth(db.width)
     else
-        bar:SetPoint("LEFT", anchor, "LEFT", 0, 0)
-        bar:SetPoint("RIGHT", anchor, "RIGHT", 0, 0)
+        -- As wide as the plate.
+        bar:SetPoint("LEFT", slot, "LEFT")
+        bar:SetPoint("RIGHT", slot, "RIGHT")
     end
     bar:SetHeight(db.height)
     bar:SetStatusBarTexture(Texture())
+    local ex = db.colors.execute
+    OverFill(f.execute, bar)
+    f.execute:SetTexture(Texture())
+    f.execute:SetVertexColor(ex.r, ex.g, ex.b)
     -- The game dims a plate whose enemy is behind terrain or far off (on the plate's base
     -- frame); without gameFade ours keeps its own opacity, like the cast bar and auras do.
     f:SetIgnoreParentAlpha(not db.gameFade)
+    Plates:PlaceDragons(f)
     Plates:PlaceBorders(f)
 
     ns.Media:SetFont(f.name, db.font, db.nameSize, db.outline)
@@ -354,7 +510,7 @@ function Plates:Layout(f)
     ns.Media:SetFont(f.threat, db.font, db.textSize, db.outline)
 
     -- Blizzard's cast bar, under ours.
-    local cast = uf and uf.CastBarsContainer and uf.CastBarsContainer.castBar
+    local cast = BlizzardCast(uf)
     if cast then
         cast:SetIgnoreParentAlpha(db.castBar)
         if db.castBar then
@@ -362,6 +518,25 @@ function Plates:Layout(f)
             cast:SetPoint("TOPLEFT", bar, "BOTTOMLEFT", 0, -db.castGap)
             cast:SetPoint("TOPRIGHT", bar, "BOTTOMRIGHT", 0, -db.castGap)
             cast:SetHeight(db.castHeight)
+        end
+        -- Casts you can't interrupt: our fill in their colour, and the shield just left of the
+        -- bar, a little taller than it, in a lighter shade of that colour.
+        local x = CastParts(cast)
+        local c = db.colors.uninterruptible
+        OverFill(x.fill, cast)
+        x.fill:SetTexture(Texture())
+        x.fill:SetVertexColor(c.r, c.g, c.b)
+        local sh = db.castHeight + 4
+        x.shield:ClearAllPoints()
+        x.shield:SetPoint("RIGHT", cast, "LEFT", -2, 0)
+        x.shield:SetSize(sh, sh)
+        x.shield:SetVertexColor(c.r + (1 - c.r) * 0.5, c.g + (1 - c.g) * 0.5, c.b + (1 - c.b) * 0.5)
+        -- Put the last shield state Blizzard set back, now the plate is ours (or the settings
+        -- changed). It may be secret, so it's never tested here.
+        if x.seen then
+            self:CastShield(uf, cast, x.last)
+        else
+            self:CastShield(uf, cast, false)
         end
     end
     -- Blizzard's auras (your debuffs; buffs you can steal; crowd control), above the name.
@@ -410,6 +585,92 @@ function Plates:UpdateHealth(f)
     for slot, fs in pairs(f.texts) do
         ns.UI.SetTemplateText(fs, ns.db.text[slot], vals, { "name", "level" })
     end
+    self:UpdateExecute(f)
+end
+
+-- The execute overlay's opacity: from the game's curve where it has one (health may be secret),
+-- otherwise worked out here while health isn't secret.
+function Plates:UpdateExecute(f)
+    local below = ns.db.execute and executeBelow
+    if not below then
+        f.execute:Hide()
+        return
+    end
+    local alpha = 0
+    local curve = ExecuteCurve(below)
+    if curve then
+        local ok, a = pcall(UnitHealthPercent, f.unit, true, curve)
+        if ok and (issecret(a) or type(a) == "number") then alpha = a end
+    else
+        local h, m = Safe(UnitHealth(f.unit)), Safe(UnitHealthMax(f.unit))
+        if h and m and m > 0 and h / m < below then alpha = 1 end
+    end
+    f.execute:SetAlpha(alpha)
+    f.execute:Show()
+end
+
+-- Elite (gold), rare (silver) or rare elite (silver, winged); world bosses get the gold one.
+function Plates:UpdateDragon(f)
+    local d = ns.db.dragons
+    local art = d.shown and DRAGON_ART[Safe(UnitClassification(f.unit)) or ""]
+    f.hasDragon = art and true or false
+    if art then
+        f.dragonRight:SetTexture(MEDIA .. art .. ".tga")
+        f.dragonLeft:SetTexture(MEDIA .. art .. ".tga")
+        f.dragonLeft:SetShown(d.both)
+    end
+    f.dragons:SetShown(f.hasDragon)
+    self:PlaceSides(f)
+end
+
+------------------------------------------------------------------------------
+-- Quest marker: whether your quests still need this enemy. The unit's tooltip, as the game builds
+-- it, lists your objectives for it with whether each is done; failing that (no objective lines, or
+-- the game withholding the tooltip), the game's own C_QuestLog.UnitIsRelatedToActiveQuest.
+------------------------------------------------------------------------------
+
+local QUEST_LINE = Enum.TooltipDataLineType and Enum.TooltipDataLineType.QuestObjective
+
+-- The unit's quest objective lines, and how many aren't done; nothing if the game won't say.
+local function QuestLines(unit)
+    if not (QUEST_LINE and C_TooltipInfo and C_TooltipInfo.GetUnit) then return end
+    local data = Safe(C_TooltipInfo.GetUnit(unit))
+    local lines = type(data) == "table" and Safe(data.lines)
+    if type(lines) ~= "table" then return end
+    local total, open = 0, 0
+    for _, line in ipairs(lines) do
+        if type(line) == "table" and Safe(line.type) == QUEST_LINE then
+            total = total + 1
+            if Safe(line.completed) ~= true then open = open + 1 end
+        end
+    end
+    return total, open
+end
+
+local function OnQuest(unit)
+    if Safe(UnitIsPlayer(unit)) ~= false then return false end
+    local ok, total, open = pcall(QuestLines, unit)
+    if ok and total and total > 0 then return open > 0 end
+    if C_QuestLog and C_QuestLog.UnitIsRelatedToActiveQuest then
+        local ok2, related = pcall(C_QuestLog.UnitIsRelatedToActiveQuest, unit)
+        return ok2 and Safe(related) == true
+    end
+    return false
+end
+
+-- The "!" sits just before the name, which moves along to make room for it.
+function Plates:UpdateQuest(f)
+    local db = ns.db
+    local shown = db.questMarker and OnQuest(f.unit) or false
+    local q = db.nameSize + 4
+    f.quest:SetSize(q, q)
+    f.quest:ClearAllPoints()
+    -- The "!" is the middle third or so of its square: its left edge on the bar's.
+    f.quest:SetPoint("BOTTOMLEFT", f.bar, "TOPLEFT", -math.floor(q * 0.3 + 0.5), 1)
+    f.quest:SetShown(shown)
+    f.name:ClearAllPoints()
+    f.name:SetPoint("BOTTOMLEFT", f.bar, "TOPLEFT", shown and math.floor(q * 0.45 + 0.5) or 0, 3)
+    f.name:SetPoint("BOTTOMRIGHT", f.bar, "TOPRIGHT", 0, 3)
 end
 
 function Plates:UpdateName(f)
@@ -441,7 +702,8 @@ function Plates:UpdateThreat(f)
         return
     end
     f.threat:Show()
-    local gap = ThreatGap(unit)
+    self:NoteThreat(unit)
+    local gap = Threat.Gap(unit)
     local c = db.colors
     if gap then
         local col = gap >= 0 and c.safe or c.danger
@@ -454,14 +716,20 @@ function Plates:UpdateThreat(f)
     end
 end
 
+-- Which mark a unit has can be secret in combat, so the number is never looked at: it goes into
+-- the icon's file name inside the text ("|T...Icon_%d:size|t"), which SetFormattedText fills in
+-- engine-side. A secret "no mark" fails to format, and hides it.
+local RAID_ICON = "Interface\\TargetingFrame\\UI-RaidTargetingIcon_"
+
 function Plates:UpdateMark(f)
-    local index = Safe(GetRaidTargetIndex(f.unit))
-    if index then
-        SetRaidTargetIconTexture(f.mark, index)
-        f.mark:Show()
-    else
+    local index = GetRaidTargetIndex(f.unit)
+    local size = ns.db.markSize
+    if not ns.db.raidMarks or (not issecret(index) and not index) then
         f.mark:Hide()
+        return
     end
+    local ok = pcall(f.mark.SetFormattedText, f.mark, "|T" .. RAID_ICON .. "%d:" .. size .. ":" .. size .. "|t", index)
+    f.mark:SetShown(ok)
 end
 
 function Plates:UpdateTarget()
@@ -469,7 +737,16 @@ function Plates:UpdateTarget()
     for base, f in pairs(frames) do
         if f.unit then
             local isTarget = target == base
-            ShowBorder(f.ringBorder, isTarget)
+            local hl = ns.db.highlight
+            f.ringBorder:SetShown(isTarget and hl.outline)
+            f.glow:SetShown(isTarget and hl.glow)
+            local arrows = isTarget and hl.arrows
+            if arrows ~= f.arrows:IsShown() then
+                f.arrows:SetShown(arrows)
+                if arrows then f.arrows.pulse:Play() else f.arrows.pulse:Stop() end
+            end
+            self:PlaceSides(f)
+            f:SetScale(isTarget and hl.scale or 1)
             f:SetAlpha((target and not isTarget) and ns.db.otherAlpha or 1)
         end
     end
@@ -481,6 +758,19 @@ function Plates:UpdateAll(f)
     self:UpdateColour(f)
     self:UpdateThreat(f)
     self:UpdateMark(f)
+    self:UpdateDragon(f)
+    self:UpdateQuest(f)
+end
+
+-- Quest progress comes in bursts of events: look again once they settle.
+local questPending
+function Plates:QuestsChanged()
+    if questPending then return end
+    questPending = true
+    C_Timer.After(0.3, function()
+        questPending = nil
+        for _, f in pairs(byUnit) do Plates:UpdateQuest(f) end
+    end)
 end
 
 ------------------------------------------------------------------------------
@@ -493,8 +783,17 @@ local function SeeThrough(uf, on)
     busy = false
     if uf.selectionHighlight then uf.selectionHighlight:SetAlpha(on and 0 or 0.25) end
     if not on then
-        local cast = uf.CastBarsContainer and uf.CastBarsContainer.castBar
-        if cast then cast:SetIgnoreParentAlpha(false) end
+        local cast = BlizzardCast(uf)
+        if cast then
+            cast:SetIgnoreParentAlpha(false)
+            -- Blizzard's shield back, ours away.
+            if cast.BorderShield then cast.BorderShield:SetAlpha(1) end
+            local x = casts[cast]
+            if x then
+                x.fill:SetAlpha(0)
+                x.shield:SetAlpha(0)
+            end
+        end
         if uf.AurasFrame then uf.AurasFrame:SetIgnoreParentAlpha(false) end
     end
 end
@@ -520,6 +819,7 @@ local function Hook(uf)
     for _, method in ipairs({ "ApplyFrameOptions", "UpdateAnchors" }) do
         if type(uf[method]) == "function" then hooksecurefunc(uf, method, Relayout) end
     end
+    HookCast(uf)
 end
 
 local function Release(uf)
@@ -587,11 +887,35 @@ end
 -- Every plate again (after a settings change, or turning it on or off).
 function Plates:Refresh()
     self:AuraSettings()
+    self:ExecuteCheck()
     for unit in pairs(byUnit) do self:Remove(unit) end
     for i = 1, 40 do
         local unit = "nameplate" .. i
         if UnitExists(unit) then self:Add(unit) end
     end
+end
+
+-- The last snapshot of your target taken in combat, so /fp threat can show it after the fight.
+local lastSeen, lastSeenAt = nil, 0
+
+function Plates:NoteThreat(unit)
+    if not (UnitAffectingCombat("player") and Safe(UnitIsUnit(unit, "target"))) then return end
+    local now = GetTime()
+    if now - lastSeenAt < 1 then return end
+    lastSeenAt = now
+    lastSeen = Threat.Snapshot(unit)
+end
+
+-- /fp threat: live while you're fighting your target, otherwise the last fight's snapshot.
+function Plates:ThreatReport()
+    local live = UnitExists("target") and UnitAffectingCombat("player")
+    local lines = live and Threat.Snapshot("target") or lastSeen
+    if not lines then
+        ns.Print("nothing seen yet: fight something with it targeted, then try again.")
+        return
+    end
+    ns.Print(live and "threat now:" or string.format("threat as last seen in combat (%ds ago):", math.floor(GetTime() - lastSeenAt)))
+    for _, line in ipairs(lines) do print(line) end
 end
 
 function Plates:Init()
@@ -601,9 +925,12 @@ function Plates:Init()
     local ev = CreateFrame("Frame")
     for _, event in ipairs({ "UNIT_HEALTH", "UNIT_MAXHEALTH", "UNIT_NAME_UPDATE", "UNIT_LEVEL", "UNIT_FACTION",
         "UNIT_FLAGS", "UNIT_THREAT_SITUATION_UPDATE", "UNIT_THREAT_LIST_UPDATE", "PLAYER_TARGET_CHANGED",
-        "RAID_TARGET_UPDATE", "UPDATE_SHAPESHIFT_FORM", "PLAYER_REGEN_ENABLED" }) do
+        "RAID_TARGET_UPDATE", "UPDATE_SHAPESHIFT_FORM", "PLAYER_REGEN_ENABLED", "SPELLS_CHANGED",
+        "UNIT_CLASSIFICATION_CHANGED", "QUEST_LOG_UPDATE", "QUEST_ACCEPTED", "QUEST_REMOVED",
+        "QUEST_TURNED_IN", "QUEST_WATCH_UPDATE" }) do
         pcall(ev.RegisterEvent, ev, event)
     end
+    pcall(ev.RegisterUnitEvent, ev, "UNIT_QUEST_LOG_CHANGED", "player")
     ev:SetScript("OnEvent", function(_, event, unit)
         if event == "PLAYER_TARGET_CHANGED" then
             Plates:UpdateTarget()
@@ -611,8 +938,16 @@ function Plates:Init()
         elseif event == "RAID_TARGET_UPDATE" then
             for _, f in pairs(byUnit) do Plates:UpdateMark(f) end
             return
-        elseif event == "UPDATE_SHAPESHIFT_FORM" or event == "PLAYER_REGEN_ENABLED" then
-            for _, f in pairs(byUnit) do Plates:UpdateColour(f) end
+        elseif event == "UPDATE_SHAPESHIFT_FORM" or event == "PLAYER_REGEN_ENABLED" or event == "SPELLS_CHANGED" then
+            -- A new stance or spell can change your execute too.
+            Plates:ExecuteCheck()
+            for _, f in pairs(byUnit) do
+                Plates:UpdateColour(f)
+                Plates:UpdateExecute(f)
+            end
+            return
+        elseif event:match("^QUEST_") or event == "UNIT_QUEST_LOG_CHANGED" then
+            Plates:QuestsChanged()
             return
         end
         local f = unit and byUnit[unit]
@@ -621,6 +956,9 @@ function Plates:Init()
             Plates:UpdateHealth(f)
         elseif event == "UNIT_NAME_UPDATE" or event == "UNIT_LEVEL" then
             Plates:UpdateName(f)
+        elseif event == "UNIT_CLASSIFICATION_CHANGED" then
+            Plates:UpdateName(f)
+            Plates:UpdateDragon(f)
         else
             Plates:UpdateColour(f)
             Plates:UpdateThreat(f)

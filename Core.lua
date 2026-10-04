@@ -19,6 +19,15 @@ ns.defaults = {
     castBar = true,     -- Blizzard's cast bar, under ours
     castHeight = 10,
     castGap = 3,
+    castColor = true,   -- casts you can't interrupt in colors.uninterruptible
+    castShield = true,  -- and a small shield just left of them
+    execute = true,     -- the bar in colors.execute once the enemy is in your class's execute range
+    -- Dragons round the bar's right end (both: round both ends): gold for elites and world
+    -- bosses, silver for rares, silver and winged for rare elites. size: 0.6 to 1.6.
+    dragons = { shown = true, both = false, size = 1 },
+    questMarker = true, -- a "!" before the name of enemies your quests still need
+    raidMarks = true,   -- raid marks (skull, cross...) beside the bar, markSize pixels
+    markSize = 18,
     auras = true,       -- Blizzard's auras (your debuffs...), above the name
     allDebuffs = true,  -- every debuff of yours, not just the ones on Blizzard's list
     -- auraScale: their size (the game's debuff scale, 0.7 to 1.4); unset leaves the game's as is.
@@ -26,6 +35,9 @@ ns.defaults = {
     role = "auto",      -- "auto" (a tanking stance, form or aura), "tank" or "damage"
     threatText = true,  -- your lead (or how far behind), or your threat %, beside the bar
     otherAlpha = 0.7,   -- other plates' opacity while you have a target
+    -- How your target stands out, in colors.target: any mix of an outline round the bar, arrows
+    -- either side ("> bar <") and a soft glow, and its plate scaled up by `scale`.
+    highlight = { outline = true, arrows = false, glow = false, scale = 1 },
     borderStyle = "pixel", -- "pixel" (1px black), "classic" (the grey stone) or "forever" (our Forever frame)
     frameThickness = 1,    -- the forever frame: screen pixels per pixel of its art (1 to 3)
     gameFade = false,   -- let the game dim plates behind terrain or far away
@@ -37,6 +49,8 @@ ns.defaults = {
         warn = { r = 0.95, g = 0.62, b = 0.22 },   -- it's slipping, or about to come to you
         danger = { r = 0.92, g = 0.24, b = 0.42 }, -- tanking: it's off you; otherwise: it's on you
         target = { r = 1.00, g = 1.00, b = 1.00 },
+        uninterruptible = { r = 0.58, g = 0.58, b = 0.62 },
+        execute = { r = 0.66, g = 0.38, b = 0.96 },
     },
 }
 
@@ -107,10 +121,18 @@ local function BuildLook(p)
         "forever", "Forever"), function() return db.borderStyle end, function(v) db.borderStyle = v end), 28)
     place(UI.Stepper(p, "Forever border thickness", 1, 3, 1, function() return db.frameThickness end,
         function(v) db.frameThickness = v end), 30, 20)
+    place(UI.Label(p, "Your target"), 22)
+    local hl = db.highlight
+    place(UI.Checkbox(p, "Outline", function() return hl.outline end, function(v) hl.outline = v end), 24, 12)
+    place(UI.Checkbox(p, "Arrows either side  > bar <", function() return hl.arrows end,
+        function(v) hl.arrows = v end), 24, 12)
+    place(UI.Checkbox(p, "Glow", function() return hl.glow end, function(v) hl.glow = v end), 26, 12)
+    place(UI.Stepper(p, "Size", 1, 1.5, 0.05, function() return hl.scale end,
+        function(v) hl.scale = v end, "%.2f"), 26, 12)
+    place(UI.ColorSwatch(p, "Colour", function() return db.colors.target end,
+        function(r, g, b) db.colors.target = { r = r, g = g, b = b } end), 26, 12)
     place(UI.Stepper(p, "Other plates while targeting", 0.2, 1, 0.05, function() return db.otherAlpha end,
-        function(v) db.otherAlpha = v end, "%.2f"), 26)
-    place(UI.ColorSwatch(p, "Target outline", function() return db.colors.target end,
-        function(r, g, b) db.colors.target = { r = r, g = g, b = b } end), 30)
+        function(v) db.otherAlpha = v end, "%.2f"), 30)
     place(UI.Checkbox(p, "Let the game dim plates behind terrain or far away", function() return db.gameFade end,
         function(v) db.gameFade = v end), 30)
     place(UI.Help(p, "Friendly nameplates stay Blizzard's. The cast bar and debuffs are Blizzard's own, "
@@ -141,11 +163,49 @@ local function BuildThreat(p)
         .. "pull it, danger once it's on you. The lead compares you with your group and pets.", 440), 54)
 end
 
+local function BuildExtras(p)
+    local db, c = ns.db, ns.db.colors
+    local place = UI.Placer()
+    local function Swatch(label, key)
+        place(UI.ColorSwatch(p, label, function() return c[key] end,
+            function(r, g, b) c[key] = { r = r, g = g, b = b } end), 30, 12)
+    end
+    place(UI.Label(p, "Casts you can't interrupt"), 22)
+    place(UI.Checkbox(p, "In their own colour", function() return db.castColor end,
+        function(v) db.castColor = v end), 26, 12)
+    Swatch("Colour", "uninterruptible")
+    place(UI.Checkbox(p, "A shield beside them", function() return db.castShield end,
+        function(v) db.castShield = v end), 34, 12)
+    place(UI.Label(p, "Execute range"), 22)
+    place(UI.Checkbox(p, "Colour the bar once you can execute", function() return db.execute end,
+        function(v) db.execute = v end), 26, 12)
+    Swatch("Colour", "execute")
+    place(UI.Help(p, "Only once you know it, and in a stance that can use it: warriors' Execute (Battle "
+        .. "or Berserker Stance) and paladins' Hammer of Wrath, both below 20% health.", 420), 40, 12)
+    place(UI.Label(p, "Elites and rares"), 22)
+    place(UI.Checkbox(p, "Dragons round the bar's end", function() return db.dragons.shown end,
+        function(v) db.dragons.shown = v end), 26, 12)
+    place(UI.Checkbox(p, "Round both ends", function() return db.dragons.both end,
+        function(v) db.dragons.both = v end), 26, 12)
+    place(UI.Stepper(p, "Dragon size", 0.6, 1.6, 0.1, function() return db.dragons.size end,
+        function(v) db.dragons.size = v end, "%.1f"), 26, 12)
+    place(UI.Help(p, "Gold for elites (and world bosses), silver for rares, silver and winged for rare elites.",
+        420), 34, 12)
+    place(UI.Label(p, "Quests"), 22)
+    place(UI.Checkbox(p, "A \"!\" before the name of enemies your quests need", function() return db.questMarker end,
+        function(v) db.questMarker = v end), 26, 12)
+    place(UI.Checkbox(p, "Raid marks (skull, cross...) beside the bar", function() return db.raidMarks end,
+        function(v) db.raidMarks = v end), 26, 12)
+    place(UI.Stepper(p, "Raid mark size", 10, 40, 1, function() return db.markSize end,
+        function(v) db.markSize = v end), 26, 12)
+end
+
 function ns.ToggleConfig()
     if not ns.window then
-        ns.window = UI.Window("FrogPlatesConfig", "FrogPlates", 480, 860, {
+        ns.window = UI.Window("FrogPlatesConfig", "FrogPlates", 480, 980, {
             { "look", "Look", BuildLook },
             { "threat", "Threat", BuildThreat },
+            { "extras", "Extras", BuildExtras },
         })
         return
     end
@@ -184,12 +244,19 @@ end)
 
 SLASH_FROGPLATES1 = "/fp"
 SLASH_FROGPLATES2 = "/frogplates"
-SlashCmdList.FROGPLATES = ns.ToggleConfig
+SlashCmdList.FROGPLATES = function(msg)
+    if strtrim(msg or ""):lower() == "threat" then
+        ns.Plates:ThreatReport()
+    else
+        ns.ToggleConfig()
+    end
+end
 function FrogPlates_OnCompartmentClick() ns.ToggleConfig() end
 
-ns.AddOptionsPanel({
+FrogLib.Options.Add("FrogPlates", ns, {
     open = function()
         if not (ns.window and ns.window:IsShown()) then ns.ToggleConfig() end
     end,
-    commands = { { "/fp", "open or close the settings" } },
+    commands = { { "/fp", "open or close the settings" },
+        { "/fp threat", "what the game shows addons of the threat on your target" } },
 })
