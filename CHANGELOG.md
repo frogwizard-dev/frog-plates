@@ -1,5 +1,19 @@
 # FrogPlates
 
+## 0.2.1
+
+### Threat
+- Where the game hides the threat numbers (in dungeons), the plate shows where you stand instead of a percent that read 100% for the tank all the time: "Tanking" when it's on you and staying, "Slipping" when someone else is about to take it, "Pulling!" when you're about to take it. Otherwise your share of what would pull it, as before; with the numbers available, your lead as before.
+
+### Fixes
+- Plates keep their name and texts where the game hides an enemy's name (some instances); before, they stopped updating.
+- An enemy player whose class the game hides no longer causes an error in the plate's colour.
+- Text inside the bar shows the level when the game hides it, instead of leaving it blank, and a new word, `class`.
+
+### Under the hood
+- The execute range's curve is FrogLib's now, shared with Frog Wizard's other add-ons; nothing changes in use.
+- Names, levels, class colours, raid marks, the threat lead's text and the text templates are FrogLib's, shared with EnmityList and the other Frog Wizard add-ons.
+
 ## 0.2.0
 
 - Casts you can't interrupt stand out: the cast bar turns grey (or a colour of your choice) and a small shield shows beside it. Either can be turned off. It follows Blizzard's own cast bar, so it keeps working in combat when the game hides cast details.

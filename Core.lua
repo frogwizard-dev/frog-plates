@@ -13,8 +13,8 @@ ns.defaults = {
     nameSize = 11,
     textSize = 9,
     showLevel = true,   -- level before the name, in its difficulty colour ("+" for elites)
-    -- Text inside the bar, left / centre / right. Words: value, max, percent (percent.1 for a
-    -- decimal), name, level. Empty hides it.
+    -- Text inside the bar, left / centre / right. Words (FrogLib.Unit's): value, max, percent
+    -- (percent.1 for a decimal), name, level, class. Empty hides it.
     text = { left = "", center = "", right = "percent" },
     castBar = true,     -- Blizzard's cast bar, under ours
     castHeight = 10,
@@ -104,7 +104,7 @@ local function BuildLook(p)
             function(v) db.text[slot[1]] = v end), 26, 12)
     end
     place(UI.Help(p, "Words: |cffffd100value|r, |cffffd100max|r, |cffffd100percent|r "
-        .. "(|cffffd100percent.1|r for a decimal), |cffffd100name|r, |cffffd100level|r. "
+        .. "(|cffffd100percent.1|r for a decimal), |cffffd100name|r, |cffffd100level|r, |cffffd100class|r. "
         .. "For example: value / max. Leave one empty to hide it.", 440), 36, 4)
     place(UI.Checkbox(p, "Cast bar under the bar", function() return db.castBar end,
         function(v) db.castBar = v end), 26)

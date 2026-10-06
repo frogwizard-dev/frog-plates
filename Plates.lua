@@ -23,7 +23,8 @@ local Plates = {}
 ns.Plates = Plates
 
 local issecret, Safe = FrogLib.issecret, FrogLib.Safe
-local Borders, Threat = FrogLib.Borders, FrogLib.Threat
+local Borders, Threat, Color, Unit = FrogLib.Borders, FrogLib.Threat, FrogLib.Color, FrogLib.Unit
+local Icons = FrogLib.Icons
 
 local WHITE = "Interface\\Buttons\\WHITE8X8"
 local MEDIA = "Interface\\AddOns\\FrogPlates\\Media\\"
@@ -39,16 +40,8 @@ local frames = {} -- plate base -> our frame
 local byUnit = {} -- nameplate unit token -> our frame
 local busy        -- our own SetAlpha, which the hook below ignores
 
-local function Loaded(addon)
-    local isLoaded = (C_AddOns and C_AddOns.IsAddOnLoaded) or IsAddOnLoaded
-    return isLoaded and isLoaded(addon)
-end
-
 -- A path inside an add-on that isn't loaded (FrogUI's textures, without FrogUI) can't be used.
-local function Usable(path)
-    local addon = path:match("^[Ii]nterface[\\/][Aa]dd[Oo]ns[\\/]([^\\/]+)")
-    return not addon or Loaded(addon)
-end
+local Usable = FrogLib.Media.Usable
 
 local function Texture()
     return Usable(ns.db.texture) and ns.db.texture or WHITE
@@ -80,29 +73,29 @@ local function Tanking()
     return false
 end
 
+-- After threat, FrogLib.Color's rules: tapped, players' class, then neutral (or friendly) and
+-- hostile; hostile when the game won't say.
+local rules = { class = true }
+
 local function Colour(unit)
     local c = ns.db.colors
     local situation = ns.db.threat and Safe(UnitThreatSituation("player", unit))
     if situation then
         -- 3: it's on you, safely; 2: on you, but someone's close; 1: someone else is about to
         -- take it; 0: it's on someone else.
+        local t
         if Tanking() then
-            if situation == 3 then return c.safe end
-            if situation == 2 then return c.warn end
-            return c.danger
+            t = (situation == 3 and c.safe) or (situation == 2 and c.warn) or c.danger
+        elseif situation >= 2 then
+            t = c.danger
+        elseif situation == 1 then
+            t = c.warn
         end
-        if situation >= 2 then return c.danger end
-        if situation == 1 then return c.warn end
+        if t then return t.r, t.g, t.b end
     end
-    if Safe(UnitIsTapDenied(unit)) then return c.tapped end
-    if Safe(UnitIsPlayer(unit)) then
-        local _, class = UnitClass(unit)
-        local cc = class and RAID_CLASS_COLORS[class]
-        if cc then return cc end
-    end
-    local reaction = Safe(UnitReaction(unit, "player"))
-    if reaction and reaction >= 4 then return c.neutral end
-    return c.hostile
+    rules.tapped, rules.hostile, rules.fallback = c.tapped, c.hostile, c.hostile
+    rules.neutral, rules.friendly = c.neutral, c.neutral
+    return Color.Unit(unit, rules)
 end
 
 ------------------------------------------------------------------------------
@@ -157,39 +150,18 @@ function Plates:ExecuteCheck()
     executeBelow = usable and e.below or false
 end
 
--- 1 under the line and 0 from it up, for the overlay's opacity. The game evaluates it against the
--- health fraction (UnitHealthPercent), so the answer may be secret, which SetAlpha takes.
-local curves = {}
+-- 1 under the line and 0 from it up, for the overlay's opacity (FrogLib's step curve). The game
+-- evaluates it against the health fraction (UnitHealthPercent), so the answer may be secret,
+-- which SetAlpha takes. nil when the client has no curves.
 local function ExecuteCurve(below)
-    if curves[below] ~= nil then return curves[below] end
-    local curve = false
-    if UnitHealthPercent and C_CurveUtil and C_CurveUtil.CreateCurve then
-        local ok, c = pcall(C_CurveUtil.CreateCurve)
-        if ok and c then
-            if Enum.LuaCurveType and c.SetType then pcall(c.SetType, c, Enum.LuaCurveType.Step) end
-            -- A pair of points either side of the line, so it's sharp however steps are taken.
-            c:AddPoint(0, 1)
-            c:AddPoint(below - 0.0001, 1)
-            c:AddPoint(below, 0)
-            c:AddPoint(1, 0)
-            curve = c
-        end
-    end
-    curves[below] = curve
-    return curve
+    if not UnitHealthPercent then return nil end
+    return FrogLib.Curve.Below(below, 1, 0)
 end
 
 ------------------------------------------------------------------------------
 -- Threat gap: your lead over the next highest on its threat list (or how far behind you are),
--- worked out by FrogLib's Threat.Gap, as EnmityList's is.
+-- worked out by FrogLib's Threat.Gap and written by its SetGapText, as EnmityList's is.
 ------------------------------------------------------------------------------
-
-local function Short(n)
-    local a = math.abs(n)
-    if a >= 1000000 then return string.format("%.1fm", n / 1000000) end
-    if a >= 1000 then return string.format("%.1fk", n / 1000) end
-    return tostring(math.floor(n + 0.5))
-end
 
 ------------------------------------------------------------------------------
 -- Our frame
@@ -555,35 +527,14 @@ end
 -- Filling it in
 ------------------------------------------------------------------------------
 
--- A unit's name as the game's own frames show it: on Forever that includes the surname
--- (GetUnitName's second argument), where UnitName gives only the first name.
-local function FullName(unit)
-    if GetUnitName then
-        local ok, name = pcall(GetUnitName, unit, true)
-        if ok and name then return name end
-    end
-    return UnitName(unit)
-end
-
-local function HealthPercent(unit)
-    if UnitHealthPercent and CurveConstants then
-        return UnitHealthPercent(unit, true, CurveConstants.ScaleTo100)
-    end
-    local h, m = UnitHealth(unit), UnitHealthMax(unit)
-    if issecret(h) or issecret(m) or m == 0 then return 0 end
-    return h / m * 100
-end
-
 function Plates:UpdateHealth(f)
     local unit = f.unit
     f.bar:SetMinMaxValues(0, UnitHealthMax(unit))
     f.bar:SetValue(UnitHealth(unit))
-    -- Health may be secret: the values only ever go to SetFormattedText.
-    local level = Safe(UnitLevel(unit))
-    local vals = { value = UnitHealth(unit), max = UnitHealthMax(unit), percent = HealthPercent(unit),
-        name = FullName(unit) or "", level = level and (level > 0 and tostring(level) or "??") or "" }
+    -- Health, the name and the level may be secret: FrogLib.Unit's words only ever go to
+    -- SetFormattedText.
     for slot, fs in pairs(f.texts) do
-        ns.UI.SetTemplateText(fs, ns.db.text[slot], vals, { "name", "level" })
+        Unit.SetText(fs, ns.db.text[slot], unit)
     end
     self:UpdateExecute(f)
 end
@@ -599,8 +550,8 @@ function Plates:UpdateExecute(f)
     local alpha = 0
     local curve = ExecuteCurve(below)
     if curve then
-        local ok, a = pcall(UnitHealthPercent, f.unit, true, curve)
-        if ok and (issecret(a) or type(a) == "number") then alpha = a end
+        local a = FrogLib.Curve.Health(f.unit, curve)
+        if issecret(a) or a ~= nil then alpha = a end
     else
         local h, m = Safe(UnitHealth(f.unit)), Safe(UnitHealthMax(f.unit))
         if h and m and m > 0 and h / m < below then alpha = 1 end
@@ -675,24 +626,30 @@ end
 
 function Plates:UpdateName(f)
     local unit, db = f.unit, ns.db
-    local name = FullName(unit)
+    -- The name may be secret: never tested, only written.
+    local name = Unit.Name(unit)
+    if not issecret(name) and name == nil then name = "" end
     local level = db.showLevel and Safe(UnitLevel(unit))
     if level then
         local text = level > 0 and tostring(level) or "??"
         local class = Safe(UnitClassification(unit))
         if class == "elite" or class == "rareelite" or class == "worldboss" then text = text .. "+" end
         local c = (level > 0 and GetCreatureDifficultyColor) and GetCreatureDifficultyColor(level) or { r = 1, g = 0.2, b = 0.2 }
-        pcall(f.name.SetFormattedText, f.name, "|cff%02x%02x%02x%s|r %s",
-            c.r * 255, c.g * 255, c.b * 255, text, name or "")
+        pcall(f.name.SetFormattedText, f.name, "%s %s", Color.Wrap(text, c.r, c.g, c.b), name)
     else
-        pcall(f.name.SetText, f.name, name or "")
+        pcall(f.name.SetText, f.name, name)
     end
 end
 
 function Plates:UpdateColour(f)
-    local c = Colour(f.unit)
-    f.bar:SetStatusBarColor(c.r, c.g, c.b)
+    f.bar:SetStatusBarColor(Colour(f.unit))
 end
+
+local STATUS = {
+    [1] = { "Pulling!", "danger" },
+    [2] = { "Slipping", "danger" },
+    [3] = { "Tanking", "safe" },
+}
 
 function Plates:UpdateThreat(f)
     local unit, db = f.unit, ns.db
@@ -706,30 +663,28 @@ function Plates:UpdateThreat(f)
     local gap = Threat.Gap(unit)
     local c = db.colors
     if gap then
-        local col = gap >= 0 and c.safe or c.danger
+        Threat.SetGapText(f.threat, gap, c.safe, c.danger)
+    elseif situation >= 1 then
+        -- The numbers are hidden (in dungeons the game keeps them from addons), so no lead: the
+        -- game's own verdict instead. 3: it's on you and staying; 2: it's on you but someone has
+        -- more and it's about to go; 1: it's on someone else but you have more, it's coming to you.
+        local word, col = STATUS[situation][1], STATUS[situation][2] == "safe" and c.safe or c.danger
         f.threat:SetTextColor(col.r, col.g, col.b)
-        f.threat:SetText((gap >= 0 and "+" or "") .. Short(gap))
+        f.threat:SetText(word)
     else
+        -- Not on you: your threat as a share of what would pull it (may be secret).
         local _, _, percent = UnitDetailedThreatSituation("player", unit)
         f.threat:SetTextColor(1, 1, 1)
         pcall(f.threat.SetFormattedText, f.threat, "%d%%", percent)
     end
 end
 
--- Which mark a unit has can be secret in combat, so the number is never looked at: it goes into
--- the icon's file name inside the text ("|T...Icon_%d:size|t"), which SetFormattedText fills in
--- engine-side. A secret "no mark" fails to format, and hides it.
-local RAID_ICON = "Interface\\TargetingFrame\\UI-RaidTargetingIcon_"
-
+-- Which mark a unit has can be secret in combat, so the number is never looked at: FrogLib.Icons
+-- writes it into the icon's file name inside the text, filled in engine-side. A secret "no mark"
+-- fails to format, and hides it.
 function Plates:UpdateMark(f)
-    local index = GetRaidTargetIndex(f.unit)
-    local size = ns.db.markSize
-    if not ns.db.raidMarks or (not issecret(index) and not index) then
-        f.mark:Hide()
-        return
-    end
-    local ok = pcall(f.mark.SetFormattedText, f.mark, "|T" .. RAID_ICON .. "%d:" .. size .. ":" .. size .. "|t", index)
-    f.mark:SetShown(ok)
+    local shown = ns.db.raidMarks and Icons.RaidMark(f.mark, f.unit, ns.db.markSize) or false
+    f.mark:SetShown(shown)
 end
 
 function Plates:UpdateTarget()
@@ -899,7 +854,7 @@ end
 local lastSeen, lastSeenAt = nil, 0
 
 function Plates:NoteThreat(unit)
-    if not (UnitAffectingCombat("player") and Safe(UnitIsUnit(unit, "target"))) then return end
+    if not (Safe(UnitAffectingCombat("player")) and Safe(UnitIsUnit(unit, "target"))) then return end
     local now = GetTime()
     if now - lastSeenAt < 1 then return end
     lastSeenAt = now
@@ -908,7 +863,7 @@ end
 
 -- /fp threat: live while you're fighting your target, otherwise the last fight's snapshot.
 function Plates:ThreatReport()
-    local live = UnitExists("target") and UnitAffectingCombat("player")
+    local live = UnitExists("target") and Safe(UnitAffectingCombat("player"))
     local lines = live and Threat.Snapshot("target") or lastSeen
     if not lines then
         ns.Print("nothing seen yet: fight something with it targeted, then try again.")
