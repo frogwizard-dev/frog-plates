@@ -54,20 +54,9 @@ ns.defaults = {
     },
 }
 
-local function CopyDefaults(src, dst)
-    for k, v in pairs(src) do
-        if type(v) == "table" then
-            if type(dst[k]) ~= "table" then dst[k] = {} end
-            CopyDefaults(v, dst[k])
-        elseif dst[k] == nil then
-            dst[k] = v
-        end
-    end
-end
+local CopyDefaults = FrogLib.Util.CopyDefaults
 
-function ns.Print(...)
-    print("|cff7fd15fFrogPlates|r:", ...)
-end
+ns.Print = FrogLib.Util.Printer("FrogPlates", "7fd15f")
 
 function ns.Refresh()
     ns.Plates:Refresh()

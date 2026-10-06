@@ -1,5 +1,9 @@
 # FrogPlates
 
+## 0.2.2
+
+- Settings: a dropdown shows the current choice afresh whenever its page opens, and shift-clicking + or - moves ten steps at once. The settings controls now come from FrogLib, shared with Frog Wizard's other add-ons.
+
 ## 0.2.1
 
 ### Threat

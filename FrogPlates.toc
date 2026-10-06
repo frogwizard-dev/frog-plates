@@ -2,7 +2,7 @@
 ## Title: FrogPlates
 ## Category: Frog Wizard
 ## Notes: Minimal dark enemy nameplates to go with FrogUI: threat colours and your lead, cast bars, your debuffs, and a clear target.
-## Version: 0.2.1
+## Version: 0.2.2
 ## OptionalDeps: FrogUI
 ## SavedVariables: FrogPlatesDB
 ## IconTexture: Interface\Icons\INV_Misc_Toy_10

@@ -374,11 +374,8 @@ function Plates:PlaceBorders(f)
     local db = ns.db
     local style = db.borderStyle
     f.placedScale = f:GetEffectiveScale()
-    f.border:Place(1, 0, { r = 0, g = 0, b = 0 })
-    f.border:SetShown(style == "pixel")
-    f.stone:SetShown(style == "classic")
-    if style == "forever" then f.frameArt:Place(db.frameThickness) end
-    f.frameArt:SetShown(style == "forever")
+    Borders.Show({ edges = f.border, stone = f.stone, forever = f.frameArt }, style,
+        { size = 1, color = { r = 0, g = 0, b = 0 }, thickness = db.frameThickness })
     -- The target ring goes just outside whichever border it is.
     local out = (style == "classic" and 3) or (style == "forever" and 2 * (db.frameThickness or 1)) or 1
     f.ringBorder:Place(1, out, db.colors.target)
