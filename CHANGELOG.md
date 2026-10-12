@@ -1,5 +1,15 @@
 # FrogPlates
 
+## 0.3.0
+
+- A nudge for the Classic look's level (and the skull in its place) in its box: "Classic: level nudge" under Text, right/left and up/down.
+- Your debuffs sit over the plate (centred in the Classic look, from the bar's left end in ours), and crowd control just past its right end: Blizzard pins them to its own hidden bar and name, which put them off to one side.
+- The time left on an enemy's cast or channel, on its cast bar (from the game's own timer, so it shows even when the game keeps cast times hidden in combat). On by default; "Time left on the cast" under the cast bar settings, with its own size and nudge. The spell's name on the cast bar in your font and outline, with its own size and nudge too.
+- Font outline: a new "Drop shadow" choice, no outline but a soft black shadow under the text (FrogLib's).
+- A dead enemy's plate goes straight away (it could stay up while the game kept the plate).
+- Scale: the whole plate drawn bigger or smaller (0.5 to 2), its shape kept, Blizzard's cast bar and your debuffs with it; your target's own enlargement on top.
+- A Classic look (Look, at the top of the settings): Classic's own nameplate art, still in the game's files, round the same bar. At Classic's own size and proportions (a 103.75 x 10 bar in a 128 x 16 border, or your own sizes): the old gold border with the level in its box at the end (the skull for ?? levels; grey stone if you'd rather), Classic's pure red, yellow and grey, the name centred above, Forever's own Classic cast bar frame (the health border's twin, the spell's icon in its slot at the left) lined up under the health bar as Blizzard's own Classic style lays it out, with Classic's small shield round casts you can't interrupt, the old glow over your target's bar (in your target colour, at your opacity), and Classic's little dragon curled round an elite's level. Threat colours, the execute colour, your debuffs, raid marks, the quest "!" and threat text all carry on as before.
+
 ## 0.2.2
 
 - Settings: a dropdown shows the current choice afresh whenever its page opens, and shift-clicking + or - moves ten steps at once. The settings controls now come from FrogLib, shared with Frog Wizard's other add-ons.

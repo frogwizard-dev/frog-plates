@@ -18,6 +18,9 @@ local _, ns = ...
 -- the bar in the execute colour once the enemy is in range of your class's execute (worked out
 -- by the game from the health, so it works while that's secret); gold and silver dragons round
 -- elite and rare plates; and a "!" before the name of enemies your quests still need.
+--
+-- Two looks (ns.db.look): ours, and "classic": Classic's own nameplate art, still in the game's
+-- files (see CLASSIC below), round the same bar and Blizzard's cast bar.
 
 local Plates = {}
 ns.Plates = Plates
@@ -35,6 +38,29 @@ local QUEST_ICON = "Interface\\GossipFrame\\AvailableQuestIcon" -- the yellow "!
 -- end, and how far right the art reaches.
 local DRAGON = { size = 128, holeX = 51.5, holeY = 58.5, holeR = 27.5, right = 125 }
 local DRAGON_ART = { elite = "DragonElite", worldboss = "DragonElite", rare = "DragonRare", rareelite = "DragonRareElite" }
+-- Classic's nameplate art (Interface\Tooltips), measured in texels of each file:
+--   border (256 x 32): the bar's opening x 5-106, rows 20-27; the level box x 107-134, its middle at
+--     x 121; cut in three (left cap 0-8, a middle that stretches 8-100, the end with the box
+--     100-136), rows 16-31. Forever's copy is gold: tinted to Classic's grey stone (classicGrey).
+--   cast bar border (128 x 32, Forever's Classic one): the health border mirrored, its icon slot on
+--     the left; drawn 128 x 16 (its lower half) round a cast bar 20.75 in from its left, 3.5 from
+--     its right, as Blizzard's own Classic style lays it out; the spell's icon (14) 11.5 in from its
+--     left; casts you can't interrupt in Classic's small shield.
+--   glow (128 x 32): over the bar's opening exactly (x 5-106, rows 20-27), added on.
+--   elite dragon (64 x 32): a C round x 8-22, rows 6-17, its art 37 x 27.
+local CLASSIC = {
+    border = "Interface\\Tooltips\\Nameplate-Border",
+    cast = "Interface\\Tooltips\\Nameplate-Border-Castbar",
+    shield = "Interface\\CastingBar\\UI-CastingBar-Small-Shield",
+    glow = "Interface\\Tooltips\\Nameplate-Glow",
+    elite = "Interface\\Tooltips\\EliteNameplateIcon",
+    skull = "Interface\\TargetingFrame\\UI-TargetingFrame-Skull",
+    bar = "Interface\\TargetingFrame\\UI-StatusBar",
+}
+local function Classic() return ns.db.look == "classic" end
+local CLASSIC_COLORS = { hostile = { r = 1, g = 0, b = 0 }, neutral = { r = 1, g = 1, b = 0 },
+    tapped = { r = 0.5, g = 0.5, b = 0.5 } }
+
 local own = {}    -- Blizzard unit frames we've made see-through
 local frames = {} -- plate base -> our frame
 local byUnit = {} -- nameplate unit token -> our frame
@@ -44,6 +70,7 @@ local busy        -- our own SetAlpha, which the hook below ignores
 local Usable = FrogLib.Media.Usable
 
 local function Texture()
+    if Classic() then return CLASSIC.bar end
     return Usable(ns.db.texture) and ns.db.texture or WHITE
 end
 
@@ -93,6 +120,8 @@ local function Colour(unit)
         end
         if t then return t.r, t.g, t.b end
     end
+    -- The classic look: Classic's own pure red, yellow and grey.
+    if Classic() then c = CLASSIC_COLORS end
     rules.tapped, rules.hostile, rules.fallback = c.tapped, c.hostile, c.hostile
     rules.neutral, rules.friendly = c.neutral, c.neutral
     return Color.Unit(unit, rules)
@@ -200,6 +229,28 @@ local function Create(base)
     f.dragonLeft = f.dragons:CreateTexture(nil, "ARTWORK")
     f.dragonLeft:SetTexCoord(1, 0, 0, 1)
     f.dragons:Hide()
+    -- The classic look: its border round the bar (in three pieces, the middle stretching), the
+    -- elite dragon round the level box, and the glow over your target's bar.
+    f.classic = CreateFrame("Frame", nil, f)
+    f.classic:SetAllPoints(bar)
+    f.classic:SetFrameLevel(bar:GetFrameLevel() + 1)
+    f.classicParts = {}
+    for i = 1, 3 do
+        local t = f.classic:CreateTexture(nil, "ARTWORK")
+        t:SetTexture(CLASSIC.border)
+        f.classicParts[i] = t
+    end
+    f.elite = f.classic:CreateTexture(nil, "OVERLAY")
+    f.elite:SetTexture(CLASSIC.elite)
+    f.elite:SetTexCoord(0, 1, 0, 1)
+    f.elite:Hide()
+    f.classicGlow = bar:CreateTexture(nil, "ARTWORK", nil, 3)
+    f.classicGlow:SetTexture(CLASSIC.glow)
+    f.classicGlow:SetTexCoord(5 / 128, 106 / 128, 20 / 32, 27 / 32)
+    f.classicGlow:SetBlendMode("ADD")
+    f.classicGlow:SetAllPoints(bar)
+    f.classicGlow:Hide()
+    f.classic:Hide()
     -- Your target: a second, coloured ring round the black one.
     f.ring = CreateFrame("Frame", nil, f)
     f.ring:SetAllPoints(bar)
@@ -262,6 +313,13 @@ local function Create(base)
     f.mark:SetFont(STANDARD_TEXT_FONT, 12, "")
     f.mark:SetPoint("RIGHT", bar, "LEFT", -4, 0)
     f.mark:Hide()
+    -- The classic look's level, in its box (and the skull for ??).
+    f.level = text:CreateFontString(nil, "OVERLAY")
+    f.level:SetShadowOffset(1, -1)
+    f.level:SetShadowColor(0, 0, 0, 1)
+    f.skull = text:CreateTexture(nil, "OVERLAY")
+    f.skull:SetTexture(CLASSIC.skull)
+    f.skull:Hide()
     -- Wanted by your quests: a "!" before the name (see UpdateQuest).
     f.quest = text:CreateTexture(nil, "OVERLAY")
     f.quest:SetTexture(QUEST_ICON)
@@ -298,6 +356,44 @@ end
 -- the bar. Blizzard's shield is hidden on our plates (its art doesn't fit our bar).
 ------------------------------------------------------------------------------
 
+-- A classic frame in three pieces round `region`, from its file's measurements (in texels):
+-- cuts = { left, mid, end, right } (the pieces' edges), open = { x0, x1, y0 } (the opening's left
+-- and right, and its top row), rows = { top, bottom } (the pieces' rows), size = { w, h } (the
+-- file's). k: units per texel. The middle stretches with the region's width. rightW: the right piece
+-- drawn this many texels wide (squeezed), if not its own.
+local function PlaceThree(parts, region, k, cuts, open, rows, size, rightW)
+    local l, m, e, r = cuts[1], cuts[2], cuts[3], cuts[4]
+    local top, bottom = rows[1], rows[2]
+    local h = (bottom - top) * k
+    local v0, v1 = top / size[2], bottom / size[2]
+    local left, mid, right = parts[1], parts[2], parts[3]
+    left:ClearAllPoints()
+    left:SetPoint("TOPLEFT", region, "TOPLEFT", -(open[1] - l) * k, (open[3] - top) * k)
+    left:SetSize((m - l) * k, h)
+    left:SetTexCoord(l / size[1], m / size[1], v0, v1)
+    right:ClearAllPoints()
+    right:SetPoint("TOPLEFT", region, "TOPRIGHT", (e - open[2]) * k, (open[3] - top) * k)
+    right:SetSize((rightW or (r - e)) * k, h)
+    right:SetTexCoord(e / size[1], r / size[1], v0, v1)
+    mid:ClearAllPoints()
+    mid:SetPoint("TOPLEFT", left, "TOPRIGHT")
+    mid:SetPoint("BOTTOMRIGHT", right, "BOTTOMLEFT")
+    mid:SetTexCoord(m / size[1], e / size[1], v0, v1)
+end
+
+-- Classic's plate: its border (the 128 x 32 original's lower half) drawn 128 x 16 round a 103.75 x 10
+-- health bar, the bar 3.5 in from its left, 20.75 from its right, 2.5 from its top (so the fill runs
+-- under the border's inner bevel, as it did). Forever's copy is the same but for a wider level box:
+-- its end (100-136) is drawn squeezed to the original's (100-128).
+local BORDER_CUTS, BORDER_OPEN, BORDER_ROWS, BORDER_SIZE = { 0, 8, 100, 136 }, { 3.5, 107.25, 18.5 }, { 16, 32 }, { 256, 32 }
+local BORDER_END = 28
+local CLASSIC_BAR_W, CLASSIC_BAR_H = 103.75, 10
+-- The classic cast bar, from its border's left (20.75) and right (3.5) ends, 2.5 below its top
+-- and 3.5 above its bottom, 10 tall; its border lined up under the health bar's, 2 below it.
+local CAST_IN_L, CAST_IN_R, CAST_IN_T, CAST_IN_B = 20.75, 3.5, 2.5, 3.5
+local CAST_BORDER_GAP = 2
+local CAST_EXTRAS = { "Border", "CastTargetNameText", "CastTargetIndicator" }
+
 local casts = {} -- Blizzard cast bar -> our parts on it: fill, shield, and the last shield state
 
 local function CastParts(cast)
@@ -309,6 +405,14 @@ local function CastParts(cast)
     x.shield = cast:CreateTexture(nil, "OVERLAY", nil, 7)
     x.shield:SetTexture(MEDIA .. "Shield.tga")
     x.shield:SetAlpha(0)
+    -- The classic look's cast bar frame, and its shielded one over it for casts you can't interrupt.
+    x.classic = cast:CreateTexture(nil, "OVERLAY", nil, 5)
+    x.classic:SetTexture(CLASSIC.cast)
+    x.classic:SetTexCoord(0, 1, 0.5, 1)
+    x.classic:SetAlpha(0)
+    x.classicShield = cast:CreateTexture(nil, "OVERLAY", nil, 6)
+    x.classicShield:SetTexture(CLASSIC.shield)
+    x.classicShield:SetAlpha(0)
     casts[cast] = x
     return x
 end
@@ -345,16 +449,50 @@ function Plates:CastShield(uf, cast, shown)
     local on = own[uf] and db.enabled and db.castBar
     if cast.BorderShield then cast.BorderShield:SetAlpha(on and 0 or 1) end
     AlphaFrom(x.fill, shown, on and db.castColor)
-    AlphaFrom(x.shield, shown, on and db.castShield)
+    local classic = Classic()
+    AlphaFrom(x.shield, shown, on and db.castShield and not classic)
+    x.classic:SetAlpha((on and classic) and 1 or 0)
+    AlphaFrom(x.classicShield, shown, on and classic and db.castShield)
 end
 
 -- Once per cast bar (they come with the pooled unit frames).
+-- The time left on a cast or channel, from the game's own timer for it: its remaining time can be
+-- secret in combat, so it only ever goes straight into the text. Nothing when there's no timer
+-- (between casts, or an interrupted cast held in red).
+local function CastTimer(unit)
+    for _, fn in ipairs({ UnitCastingDuration, UnitChannelDuration }) do
+        local ok, d = pcall(fn, unit)
+        if ok and (issecret(d) or d ~= nil) then return d end
+    end
+end
+
+local function WriteCastTime(fs, unit)
+    local d = unit and CastTimer(unit)
+    if d then
+        fs:SetFormattedText("%.1f", d:GetRemainingDuration())
+    else
+        fs:SetText("")
+    end
+end
+
 local function HookCast(uf)
     local cast = BlizzardCast(uf)
     if not cast then return end
     local x = CastParts(cast)
     if x.hooked then return end
     x.hooked = true
+    -- The time left (castTime), at the bar's right end, ten times a second while it shows.
+    x.time = cast:CreateFontString(nil, "OVERLAY", nil, 7)
+    x.time:SetShadowOffset(1, -1)
+    x.time:SetShadowColor(0, 0, 0, 1)
+    x.time:Hide()
+    local since = 0
+    cast:HookScript("OnUpdate", function(_, elapsed)
+        since = since + elapsed
+        if since < 0.1 or not x.time:IsShown() then return end
+        since = 0
+        if not pcall(WriteCastTime, x.time, cast.unit) then x.time:SetText("") end
+    end)
     if cast.BorderShield and type(cast.BorderShield.SetShown) == "function" then
         hooksecurefunc(cast.BorderShield, "SetShown", function(_, shown) Plates:CastShield(uf, cast, shown) end)
     end
@@ -372,7 +510,7 @@ end
 -- pixels, so placed again whenever the plate's scale changes (it grows as enemies come closer).
 function Plates:PlaceBorders(f)
     local db = ns.db
-    local style = db.borderStyle
+    local style = Classic() and "none" or db.borderStyle
     f.placedScale = f:GetEffectiveScale()
     Borders.Show({ edges = f.border, stone = f.stone, forever = f.frameArt }, style,
         { size = 1, color = { r = 0, g = 0, b = 0 }, thickness = db.frameThickness })
@@ -403,6 +541,8 @@ end
 function Plates:PlaceSides(f)
     local reach = f.hasDragon and f.dragonReach or 0
     local right, left = reach, ns.db.dragons.both and reach or 0
+    -- The classic look: clear of its level box (and the elite dragon round it).
+    if Classic() then right, left = f.classicReach or 0, 0 end
     local gap = f.arrowGap or 5
     f.arrowLeft:ClearAllPoints()
     f.arrowLeft:SetPoint("RIGHT", f.bar, "LEFT", -gap - left, 0)
@@ -434,6 +574,47 @@ function Plates:PlaceDragons(f)
     f.dragonReach = (DRAGON.right - DRAGON.holeX) * s - inset
 end
 
+-- The classic look's border round the bar, its level box (the level, or the skull), the elite
+-- dragon round that box, and the name centred above. As 1.x drew them (k: units per texel, 1 at
+-- Classic's own size): the level's middle 11.5 in from the border's right end, at its middle; the
+-- dragon (its whole 64 x 32 art at 57.5 x 29) from 12.5 left of and 12 above the level.
+local LEVEL_X = 128 - 11.5 - 107.25 -- past the bar's end
+local BORDER_RIGHT = 128 - 107.25
+
+function Plates:PlaceClassic(f)
+    local db = ns.db
+    local on = Classic()
+    f.classic:SetShown(on)
+    f.name:SetJustifyH(on and "CENTER" or "LEFT")
+    if not on then
+        f.level:Hide()
+        f.skull:Hide()
+        f.elite:Hide()
+        return
+    end
+    local k = (f.barHeight or db.height) / CLASSIC_BAR_H
+    PlaceThree(f.classicParts, f.bar, k, BORDER_CUTS, BORDER_OPEN, BORDER_ROWS, BORDER_SIZE, BORDER_END)
+    for _, t in ipairs(f.classicParts) do t:SetDesaturated(db.classicGrey and true or false) end
+    local bx, by = LEVEL_X * k, -0.5 * k
+    -- The level (and the skull in its place) nudged by levelX / levelY; the dragon stays put.
+    local lx, ly = bx + (db.levelX or 0), by + (db.levelY or 0)
+    f.level:ClearAllPoints()
+    f.level:SetPoint("CENTER", f.bar, "RIGHT", lx, ly)
+    ns.Media:SetFont(f.level, db.font, db.textSize, db.outline)
+    f.skull:ClearAllPoints()
+    f.skull:SetPoint("CENTER", f.bar, "RIGHT", lx, ly)
+    f.skull:SetSize(12 * k, 12 * k)
+    f.elite:ClearAllPoints()
+    f.elite:SetPoint("TOPLEFT", f.bar, "RIGHT", bx - 12.5 * k, by + 12 * k)
+    f.elite:SetSize(57.5 * k, 29 * k)
+    f.boxReach = BORDER_RIGHT * k
+    f.eliteReach = math.max(f.boxReach, bx - 12.5 * k + 57.5 * k * 37 / 64)
+    f.classicReach = f.elite:IsShown() and f.eliteReach or f.boxReach
+    -- Your target's glow over the bar, in the target colour.
+    local c = db.colors.target
+    f.classicGlow:SetVertexColor(c.r, c.g, c.b, db.highlight.classicGlow or 0.5)
+end
+
 function Plates:Layout(f)
     local db, uf = ns.db, f.uf
     local anchor = BlizzardBar(uf) or f.base
@@ -454,15 +635,24 @@ function Plates:Layout(f)
     else
         slot:SetAllPoints(anchor)
     end
-    if db.width > 0 then
+    -- The classic look at Classic's own size (classicSize): its bar, and a cast bar as wide with its
+    -- frame's proportions.
+    local classicSize = Classic() and db.classicSize
+    local width = classicSize and CLASSIC_BAR_W or db.width
+    f.barHeight = classicSize and CLASSIC_BAR_H or db.height
+    -- Blizzard's cast bar isn't ours, so our scale (db.scale) is put on its height and gap.
+    local scale = db.scale or 1
+    local k = f.barHeight / CLASSIC_BAR_H -- the classic look's units per texel
+    local castHeight = (Classic() and CLASSIC_BAR_H * k or db.castHeight) * scale
+    if width > 0 then
         bar:SetPoint("CENTER", slot, "CENTER")
-        bar:SetWidth(db.width)
+        bar:SetWidth(width)
     else
         -- As wide as the plate.
         bar:SetPoint("LEFT", slot, "LEFT")
         bar:SetPoint("RIGHT", slot, "RIGHT")
     end
-    bar:SetHeight(db.height)
+    bar:SetHeight(f.barHeight)
     bar:SetStatusBarTexture(Texture())
     local ex = db.colors.execute
     OverFill(f.execute, bar)
@@ -472,6 +662,7 @@ function Plates:Layout(f)
     -- frame); without gameFade ours keeps its own opacity, like the cast bar and auras do.
     f:SetIgnoreParentAlpha(not db.gameFade)
     Plates:PlaceDragons(f)
+    Plates:PlaceClassic(f)
     Plates:PlaceBorders(f)
 
     ns.Media:SetFont(f.name, db.font, db.nameSize, db.outline)
@@ -484,9 +675,18 @@ function Plates:Layout(f)
         cast:SetIgnoreParentAlpha(db.castBar)
         if db.castBar then
             cast:ClearAllPoints()
-            cast:SetPoint("TOPLEFT", bar, "BOTTOMLEFT", 0, -db.castGap)
-            cast:SetPoint("TOPRIGHT", bar, "BOTTOMRIGHT", 0, -db.castGap)
-            cast:SetHeight(db.castHeight)
+            if Classic() then
+                -- Its border lined up under the health bar's, so the bar itself sits further right.
+                local dx = (CAST_IN_L - BORDER_OPEN[1]) * k * scale
+                local below = BORDER_ROWS[2] - BORDER_OPEN[3] - CLASSIC_BAR_H -- the health border under its bar
+                local dy = -(below + CAST_BORDER_GAP + CAST_IN_T) * k * scale
+                cast:SetPoint("TOPLEFT", bar, "BOTTOMLEFT", dx, dy)
+                cast:SetPoint("TOPRIGHT", bar, "BOTTOMRIGHT", dx, dy)
+            else
+                cast:SetPoint("TOPLEFT", bar, "BOTTOMLEFT", 0, -db.castGap * scale)
+                cast:SetPoint("TOPRIGHT", bar, "BOTTOMRIGHT", 0, -db.castGap * scale)
+            end
+            cast:SetHeight(castHeight)
         end
         -- Casts you can't interrupt: our fill in their colour, and the shield just left of the
         -- bar, a little taller than it, in a lighter shade of that colour.
@@ -495,11 +695,58 @@ function Plates:Layout(f)
         OverFill(x.fill, cast)
         x.fill:SetTexture(Texture())
         x.fill:SetVertexColor(c.r, c.g, c.b)
-        local sh = db.castHeight + 4
+        local sh = castHeight + 4
         x.shield:ClearAllPoints()
         x.shield:SetPoint("RIGHT", cast, "LEFT", -2, 0)
         x.shield:SetSize(sh, sh)
         x.shield:SetVertexColor(c.r + (1 - c.r) * 0.5, c.g + (1 - c.g) * 0.5, c.b + (1 - c.b) * 0.5)
+        -- The classic look: its border round the cast bar, the spell's icon in its slot, Classic's
+        -- small shield round casts you can't interrupt (as Blizzard's own Classic style has them).
+        if Classic() then
+            local u = k * scale
+            x.classic:ClearAllPoints()
+            x.classic:SetPoint("TOPLEFT", cast, "TOPLEFT", -CAST_IN_L * u, CAST_IN_T * u)
+            x.classic:SetPoint("BOTTOMRIGHT", cast, "BOTTOMRIGHT", CAST_IN_R * u, -CAST_IN_B * u)
+            x.classicShield:ClearAllPoints()
+            x.classicShield:SetPoint("TOPLEFT", cast, "TOPLEFT", -20 * u, 11 * u)
+            x.classicShield:SetPoint("BOTTOMRIGHT", cast, "BOTTOMRIGHT", 13 * u, -13 * u)
+            if cast.Icon then
+                cast.Icon:ClearAllPoints()
+                cast.Icon:SetPoint("CENTER", cast, "LEFT", (11.5 - CAST_IN_L) * u, 0)
+                cast.Icon:SetSize(14 * u, 14 * u)
+                -- Over the border's slot (the border is on OVERLAY 5, the shield 6).
+                cast.Icon:SetDrawLayer("OVERLAY", 7)
+            end
+        end
+        -- The spell's name (Blizzard's text on its bar) in our font and outline, at its own size
+        -- (castNameSize; 0: the small text's), from the bar's left end nudged by castNameX / Y.
+        if cast.Text then
+            local size = (db.castNameSize or 0) > 0 and db.castNameSize or db.textSize
+            ns.Media:SetFont(cast.Text, db.font, size, db.outline)
+            cast.Text:ClearAllPoints()
+            cast.Text:SetPoint("LEFT", cast, "LEFT", 2 + (db.castNameX or 0), db.castNameY or 0)
+            cast.Text:SetJustifyH("LEFT")
+        end
+        -- The time left, in our font: inside the bar's right end in the classic look (which hides
+        -- the cast's target's name there), just past it in ours (where that name stays).
+        if x.time then
+            x.time:SetShown(db.castTime and true or false)
+            -- Its own size (castTimeSize; 0: the small text's) and nudge (castTimeX, castTimeY).
+            local size = (db.castTimeSize or 0) > 0 and db.castTimeSize or db.textSize
+            ns.Media:SetFont(x.time, db.font, size, db.outline)
+            x.time:ClearAllPoints()
+            local dx, dy = db.castTimeX or 0, db.castTimeY or 0
+            if Classic() then
+                x.time:SetPoint("RIGHT", cast, "RIGHT", -2 + dx, dy)
+            else
+                x.time:SetPoint("LEFT", cast, "RIGHT", 3 + dx, dy)
+            end
+        end
+        -- Blizzard's own border, the cast's target's name and its "aimed at you" outline: out of
+        -- sight in the classic look (1.x had none of them).
+        for _, key in ipairs(CAST_EXTRAS) do
+            if cast[key] then cast[key]:SetAlpha(Classic() and 0 or 1) end
+        end
         -- Put the last shield state Blizzard set back, now the plate is ours (or the settings
         -- changed). It may be secret, so it's never tested here.
         if x.seen then
@@ -513,9 +760,37 @@ function Plates:Layout(f)
     if auras then
         auras:SetIgnoreParentAlpha(db.auras)
         if db.auras then
+            -- Over the name (higher in the classic look, whose name sits above its border).
+            local up = db.nameSize + 6
+            if Classic() then up = up + 2.5 * f.barHeight / CLASSIC_BAR_H end
+            up = up * scale -- in its own (unscaled) units, over our scaled name
             auras:ClearAllPoints()
-            auras:SetPoint("BOTTOMLEFT", bar, "TOPLEFT", 0, db.nameSize + 6)
-            auras:SetPoint("BOTTOMRIGHT", bar, "TOPRIGHT", 0, db.nameSize + 6)
+            auras:SetPoint("BOTTOMLEFT", bar, "TOPLEFT", 0, up)
+            auras:SetPoint("BOTTOMRIGHT", bar, "TOPRIGHT", 0, up)
+            -- Blizzard pins its rows to its own health bar and name (UpdateAnchors, after which
+            -- this runs again): pinned to ours instead. Your debuffs over the name (centred in the
+            -- classic look, as its name is; from the bar's left end in ours), stealable buffs over
+            -- its right end, crowd control and loss of control just past it.
+            local debuffs = auras.DebuffListFrame
+            if debuffs then
+                debuffs:ClearAllPoints()
+                if Classic() then
+                    debuffs:SetPoint("BOTTOM", bar, "TOP", 0, up)
+                else
+                    debuffs:SetPoint("BOTTOMLEFT", bar, "TOPLEFT", 0, up)
+                end
+            end
+            if auras.BuffListFrame then
+                auras.BuffListFrame:ClearAllPoints()
+                auras.BuffListFrame:SetPoint("BOTTOMRIGHT", bar, "TOPRIGHT", 0, up)
+            end
+            local side = (f.classicReach and Classic() and f.classicReach or 0) * scale + 5
+            for _, key in ipairs({ "CrowdControlListFrame", "LossOfControlFrame" }) do
+                if auras[key] then
+                    auras[key]:ClearAllPoints()
+                    auras[key]:SetPoint("LEFT", bar, "RIGHT", side, 0)
+                end
+            end
         end
     end
 end
@@ -534,6 +809,12 @@ function Plates:UpdateHealth(f)
         Unit.SetText(fs, ns.db.text[slot], unit)
     end
     self:UpdateExecute(f)
+    self:UpdateDead(f)
+end
+
+-- A dead enemy's plate goes (the game can keep the plate itself for a while).
+function Plates:UpdateDead(f)
+    f:SetShown(Safe(UnitIsDead(f.unit)) ~= true)
 end
 
 -- The execute overlay's opacity: from the game's curve where it has one (health may be secret),
@@ -560,7 +841,18 @@ end
 -- Elite (gold), rare (silver) or rare elite (silver, winged); world bosses get the gold one.
 function Plates:UpdateDragon(f)
     local d = ns.db.dragons
-    local art = d.shown and DRAGON_ART[Safe(UnitClassification(f.unit)) or ""]
+    local class = Safe(UnitClassification(f.unit)) or ""
+    -- The classic look: Classic's own little dragon round the level box, for elites only.
+    if Classic() then
+        f.hasDragon = false
+        f.dragons:Hide()
+        f.elite:SetShown(d.shown and (class == "elite" or class == "rareelite" or class == "worldboss"))
+        f.classicReach = f.elite:IsShown() and f.eliteReach or f.boxReach
+        self:PlaceSides(f)
+        return
+    end
+    f.elite:Hide()
+    local art = d.shown and DRAGON_ART[class]
     f.hasDragon = art and true or false
     if art then
         f.dragonRight:SetTexture(MEDIA .. art .. ".tga")
@@ -613,6 +905,16 @@ function Plates:UpdateQuest(f)
     local q = db.nameSize + 4
     f.quest:SetSize(q, q)
     f.quest:ClearAllPoints()
+    -- The classic look: the name centred over the plate as wide as it needs (as 1.x had it), 2
+    -- above the border, the "!" just before it.
+    if Classic() then
+        local k = (f.barHeight or db.height) / CLASSIC_BAR_H
+        f.name:ClearAllPoints()
+        f.name:SetPoint("BOTTOM", f.bar, "TOP", shown and math.floor(q * 0.25 + 0.5) or 0, 2.5 * k + 2)
+        f.quest:SetPoint("RIGHT", f.name, "LEFT", math.floor(q * 0.3 + 0.5), 0)
+        f.quest:SetShown(shown)
+        return
+    end
     -- The "!" is the middle third or so of its square: its left edge on the bar's.
     f.quest:SetPoint("BOTTOMLEFT", f.bar, "TOPLEFT", -math.floor(q * 0.3 + 0.5), 1)
     f.quest:SetShown(shown)
@@ -626,6 +928,21 @@ function Plates:UpdateName(f)
     -- The name may be secret: never tested, only written.
     local name = Unit.Name(unit)
     if not issecret(name) and name == nil then name = "" end
+    -- The classic look: the name alone, the level in its box (the skull for ??, nothing while the
+    -- game keeps it secret).
+    if Classic() then
+        pcall(f.name.SetText, f.name, name)
+        local lv = Safe(UnitLevel(unit))
+        local skull = lv ~= nil and lv <= 0
+        f.skull:SetShown(skull)
+        f.level:SetShown(lv ~= nil and not skull)
+        if lv and lv > 0 then
+            local c = GetCreatureDifficultyColor and GetCreatureDifficultyColor(lv) or { r = 1, g = 1, b = 1 }
+            f.level:SetText(lv)
+            f.level:SetTextColor(c.r, c.g, c.b)
+        end
+        return
+    end
     local level = db.showLevel and Safe(UnitLevel(unit))
     if level then
         local text = level > 0 and tostring(level) or "??"
@@ -690,15 +1007,18 @@ function Plates:UpdateTarget()
         if f.unit then
             local isTarget = target == base
             local hl = ns.db.highlight
-            f.ringBorder:SetShown(isTarget and hl.outline)
-            f.glow:SetShown(isTarget and hl.glow)
+            -- The classic look's own target glow over the bar, for either the outline or the glow.
+            local classic = Classic()
+            f.ringBorder:SetShown(isTarget and hl.outline and not classic)
+            f.glow:SetShown(isTarget and hl.glow and not classic)
+            f.classicGlow:SetShown(isTarget and classic and (hl.outline or hl.glow))
             local arrows = isTarget and hl.arrows
             if arrows ~= f.arrows:IsShown() then
                 f.arrows:SetShown(arrows)
                 if arrows then f.arrows.pulse:Play() else f.arrows.pulse:Stop() end
             end
             self:PlaceSides(f)
-            f:SetScale(isTarget and hl.scale or 1)
+            f:SetScale((isTarget and hl.scale or 1) * (ns.db.scale or 1))
             f:SetAlpha((target and not isTarget) and ns.db.otherAlpha or 1)
         end
     end
@@ -738,12 +1058,18 @@ local function SeeThrough(uf, on)
         local cast = BlizzardCast(uf)
         if cast then
             cast:SetIgnoreParentAlpha(false)
-            -- Blizzard's shield back, ours away.
+            -- Blizzard's shield and border back, ours away.
             if cast.BorderShield then cast.BorderShield:SetAlpha(1) end
+            for _, key in ipairs(CAST_EXTRAS) do
+                if cast[key] then cast[key]:SetAlpha(1) end
+            end
             local x = casts[cast]
             if x then
                 x.fill:SetAlpha(0)
                 x.shield:SetAlpha(0)
+                if x.time then x.time:Hide() end
+                x.classic:SetAlpha(0)
+                x.classicShield:SetAlpha(0)
             end
         end
         if uf.AurasFrame then uf.AurasFrame:SetIgnoreParentAlpha(false) end
@@ -802,6 +1128,7 @@ function Plates:Add(unit)
     self:Layout(f)
     self:UpdateAll(f)
     f:Show()
+    self:UpdateDead(f)
     self:UpdateTarget()
 end
 

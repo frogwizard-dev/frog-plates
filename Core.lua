@@ -5,14 +5,23 @@ local UI = ns.UI
 
 ns.defaults = {
     enabled = true,
+    -- The look: "frog" (ours) or "classic" (Classic's own nameplate art: its border with the level
+    -- box, its cast bar frame, glow and elite dragon, and its pure red, yellow and grey); classicSize:
+    -- at Classic's own size (a 103.75 x 10 bar); classicGrey tints its gold border grey.
+    look = "frog",
+    classicSize = true,
+    classicGrey = false,
     texture = "Interface\\AddOns\\FrogUI\\Media\\Bars\\Matte.tga", -- flat white without FrogUI
     width = 0,     -- 0: as wide as Blizzard's plate (the nameplate size setting decides)
+    scale = 1,     -- the whole plate drawn bigger or smaller (0.5 to 2), its shape kept
     height = 10,
     font = "Interface\\AddOns\\FrogUI\\Fonts\\SourceSans3.ttf",
     outline = "OUTLINE",
     nameSize = 11,
     textSize = 9,
     showLevel = true,   -- level before the name, in its difficulty colour ("+" for elites)
+    levelX = 0,         -- the classic look's level (and skull) in its box: nudges, right and up positive
+    levelY = 0,
     -- Text inside the bar, left / centre / right. Words (FrogLib.Unit's): value, max, percent
     -- (percent.1 for a decimal), name, level, class. Empty hides it.
     text = { left = "", center = "", right = "percent" },
@@ -21,6 +30,13 @@ ns.defaults = {
     castGap = 3,
     castColor = true,   -- casts you can't interrupt in colors.uninterruptible
     castShield = true,  -- and a small shield just left of them
+    castTime = true,    -- the time left on the cast, at the cast bar's right end
+    castTimeSize = 0,   -- its text size (0: the small text's)
+    castTimeX = 0,      -- and nudges, right and up positive
+    castTimeY = 0,
+    castNameSize = 0,   -- the spell's name on the cast bar: its size (0: the small text's)
+    castNameX = 0,      -- and nudges
+    castNameY = 0,
     execute = true,     -- the bar in colors.execute once the enemy is in your class's execute range
     -- Dragons round the bar's right end (both: round both ends): gold for elites and world
     -- bosses, silver for rares, silver and winged for rare elites. size: 0.6 to 1.6.
@@ -37,7 +53,8 @@ ns.defaults = {
     otherAlpha = 0.7,   -- other plates' opacity while you have a target
     -- How your target stands out, in colors.target: any mix of an outline round the bar, arrows
     -- either side ("> bar <") and a soft glow, and its plate scaled up by `scale`.
-    highlight = { outline = true, arrows = false, glow = false, scale = 1 },
+    -- classicGlow: the classic look's glow over the bar, its opacity (in colors.target).
+    highlight = { outline = true, arrows = false, glow = false, scale = 1, classicGlow = 0.5 },
     borderStyle = "pixel", -- "pixel" (1px black), "classic" (the grey stone) or "forever" (our Forever frame)
     frameThickness = 1,    -- the forever frame: screen pixels per pixel of its art (1 to 3)
     gameFade = false,   -- let the game dim plates behind terrain or far away
@@ -68,134 +85,189 @@ end
 
 local ROLES = UI.Options("auto", "Auto (tanking stance, form or aura)", "tank", "Always tanking", "damage", "Never tanking")
 
-local function BuildLook(p)
-    local db = ns.db
-    local place = UI.Placer()
-    place(UI.Checkbox(p, "Restyle enemy nameplates", function() return db.enabled end,
-        function(v) db.enabled = v end), 30)
-    place(UI.Dropdown(p, "Bar texture", function() return ns.Media:List("statusbar") end,
-        function() return db.texture end, function(v) db.texture = v end), 28)
-    place(UI.Stepper(p, "Width (0 = Blizzard's)", 0, 250, 5, function() return db.width end,
-        function(v) db.width = v end), 26)
-    place(UI.Stepper(p, "Height", 4, 30, 1, function() return db.height end, function(v) db.height = v end), 30)
-    place(UI.Dropdown(p, "Font", function() return ns.Media:List("font") end,
-        function() return db.font end, function(v) db.font = v end), 28)
-    place(UI.Dropdown(p, "Font outline", UI.OUTLINES, function() return db.outline end,
-        function(v) db.outline = v end), 28)
-    place(UI.Stepper(p, "Name size", 6, 20, 1, function() return db.nameSize end, function(v) db.nameSize = v end), 26)
-    place(UI.Stepper(p, "Small text size", 6, 18, 1, function() return db.textSize end,
-        function(v) db.textSize = v end), 30)
-    place(UI.Checkbox(p, "Level before the name (\"+\" for elites)", function() return db.showLevel end,
-        function(v) db.showLevel = v end), 26)
-    place(UI.Label(p, "Text in the bar"), 22)
-    for _, slot in ipairs({ { "left", "Left" }, { "center", "Centre" }, { "right", "Right" } }) do
-        place(UI.TextBox(p, slot[2], function() return db.text[slot[1]] end,
-            function(v) db.text[slot[1]] = v end), 26, 12)
-    end
-    place(UI.Help(p, "Words: |cffffd100value|r, |cffffd100max|r, |cffffd100percent|r "
-        .. "(|cffffd100percent.1|r for a decimal), |cffffd100name|r, |cffffd100level|r, |cffffd100class|r. "
-        .. "For example: value / max. Leave one empty to hide it.", 440), 36, 4)
-    place(UI.Checkbox(p, "Cast bar under the bar", function() return db.castBar end,
-        function(v) db.castBar = v end), 26)
-    place(UI.Stepper(p, "Cast bar height", 4, 24, 1, function() return db.castHeight end,
-        function(v) db.castHeight = v end), 26, 20)
-    place(UI.Checkbox(p, "Your debuffs above the name", function() return db.auras end,
-        function(v) db.auras = v end), 26)
-    place(UI.Checkbox(p, "All of them (off: only the ones Blizzard picks)", function() return db.allDebuffs end,
-        function(v) db.allDebuffs = v end), 26, 20)
-    place(UI.Stepper(p, "Debuff size", 0.7, 1.4, 0.1,
-        function() return db.auraScale or tonumber(C_CVar.GetCVar("nameplateAuraScale")) or 1 end,
-        function(v) db.auraScale = v end, "%.1f"), 30, 20)
-    place(UI.Dropdown(p, "Border", UI.Options("pixel", "Pixel (1px black)", "classic", "Classic stone",
-        "forever", "Forever"), function() return db.borderStyle end, function(v) db.borderStyle = v end), 28)
-    place(UI.Stepper(p, "Forever border thickness", 1, 3, 1, function() return db.frameThickness end,
-        function(v) db.frameThickness = v end), 30, 20)
-    place(UI.Label(p, "Your target"), 22)
-    local hl = db.highlight
-    place(UI.Checkbox(p, "Outline", function() return hl.outline end, function(v) hl.outline = v end), 24, 12)
-    place(UI.Checkbox(p, "Arrows either side  > bar <", function() return hl.arrows end,
-        function(v) hl.arrows = v end), 24, 12)
-    place(UI.Checkbox(p, "Glow", function() return hl.glow end, function(v) hl.glow = v end), 26, 12)
-    place(UI.Stepper(p, "Size", 1, 1.5, 0.05, function() return hl.scale end,
-        function(v) hl.scale = v end, "%.2f"), 26, 12)
-    place(UI.ColorSwatch(p, "Colour", function() return db.colors.target end,
-        function(r, g, b) db.colors.target = { r = r, g = g, b = b } end), 26, 12)
-    place(UI.Stepper(p, "Other plates while targeting", 0.2, 1, 0.05, function() return db.otherAlpha end,
-        function(v) db.otherAlpha = v end, "%.2f"), 30)
-    place(UI.Checkbox(p, "Let the game dim plates behind terrain or far away", function() return db.gameFade end,
-        function(v) db.gameFade = v end), 30)
-    place(UI.Help(p, "Friendly nameplates stay Blizzard's. The cast bar and debuffs are Blizzard's own, "
-        .. "moved round ours, so they keep working where the game hides cast and aura details.", 440), 40)
+-- Every page is two columns of headed groups (FrogLib's UI.Column).
+local LEFT, RIGHT, COL_W, SUB = 0, 470, 430, 20
+
+local function Help(p, place, text, h, dx)
+    place(UI.Help(p, text, COL_W - 10 - (dx or 0)), h, dx or 4)
 end
 
-local function BuildThreat(p)
-    local db, c = ns.db, ns.db.colors
-    local place = UI.Placer()
-    place(UI.Checkbox(p, "Colour by threat while you're on its threat list", function() return db.threat end,
-        function(v) db.threat = v end), 28)
-    place(UI.Dropdown(p, "Are you tanking?", ROLES, function() return db.role end,
-        function(v) db.role = v end), 30)
-    local function Swatch(label, key)
-        place(UI.ColorSwatch(p, label, function() return c[key] end,
-            function(r, g, b) c[key] = { r = r, g = g, b = b } end), 26)
+local function Swatch(p, place, label, key, dx)
+    local c = ns.db.colors
+    place(UI.ColorSwatch(p, label, function() return c[key] end,
+        function(r, g, b) c[key] = { r = r, g = g, b = b } end), 28, dx)
+end
+
+local function BuildLook(p)
+    local db = ns.db
+    local place, head = UI.Column(p, LEFT, COL_W)
+    head("Plates")
+    place(UI.Checkbox(p, "Restyle enemy nameplates", function() return db.enabled end,
+        function(v) db.enabled = v end), 30)
+    place(UI.Dropdown(p, "Look", UI.Options("frog", "FrogPlates (dark, minimal)", "classic", "Classic (1.x nameplates)"),
+        function() return db.look end, function(v) db.look = v end), 30)
+    place(UI.Checkbox(p, "Classic: its own size (bar 104 x 10; off: the sizes below)",
+        function() return db.classicSize end, function(v) db.classicSize = v end), 26, SUB)
+    place(UI.Checkbox(p, "Classic: grey stone instead of gold", function() return db.classicGrey end,
+        function(v) db.classicGrey = v end), 30, SUB)
+    place(UI.Dropdown(p, "Bar texture", function() return ns.Media:List("statusbar") end,
+        function() return db.texture end, function(v) db.texture = v end), 30)
+    place(UI.Dropdown(p, "Border", UI.Options("pixel", "Pixel (1px black)", "classic", "Classic stone",
+        "forever", "Forever"), function() return db.borderStyle end, function(v) db.borderStyle = v end), 30)
+    place(UI.Stepper(p, "Forever border thickness", 1, 3, 1, function() return db.frameThickness end,
+        function(v) db.frameThickness = v end), 28, SUB)
+
+    head("Size")
+    place(UI.Stepper(p, "Width (0 = Blizzard's)", 0, 250, 5, function() return db.width end,
+        function(v) db.width = v end), 28)
+    place(UI.Stepper(p, "Height", 4, 30, 1, function() return db.height end, function(v) db.height = v end), 28)
+    place(UI.Stepper(p, "Scale", 0.5, 2, 0.05, function() return db.scale end,
+        function(v) db.scale = v end, "%.2f"), 30)
+    place(UI.Checkbox(p, "Let the game dim plates behind terrain or far away", function() return db.gameFade end,
+        function(v) db.gameFade = v end), 30)
+    Help(p, place, "Friendly nameplates stay Blizzard's. The cast bar and debuffs are Blizzard's own, "
+        .. "moved round ours, so they keep working where the game hides cast and aura details.", 40)
+
+    local right, rhead = UI.Column(p, RIGHT, COL_W)
+    rhead("Text")
+    right(UI.Dropdown(p, "Font", function() return ns.Media:List("font") end,
+        function() return db.font end, function(v) db.font = v end), 30)
+    right(UI.Dropdown(p, "Outline", UI.OUTLINES, function() return db.outline end,
+        function(v) db.outline = v end), 30)
+    right(UI.Stepper(p, "Name size", 6, 20, 1, function() return db.nameSize end, function(v) db.nameSize = v end), 28)
+    right(UI.Stepper(p, "Small text size", 6, 18, 1, function() return db.textSize end,
+        function(v) db.textSize = v end), 30)
+    right(UI.Checkbox(p, "Level before the name (\"+\" for elites)", function() return db.showLevel end,
+        function(v) db.showLevel = v end), 26)
+    right(UI.Pair(p, "Classic: level nudge", { "x", -30, 30, function() return db.levelX end, function(v) db.levelX = v end },
+        { "y", -30, 30, function() return db.levelY end, function(v) db.levelY = v end }), 28)
+
+    rhead("Text in the bar")
+    for _, slot in ipairs({ { "left", "Left" }, { "center", "Centre" }, { "right", "Right" } }) do
+        right(UI.TextBox(p, slot[2], function() return db.text[slot[1]] end,
+            function(v) db.text[slot[1]] = v end), 28)
     end
-    Swatch("Safe (on you, tanking)", "safe")
-    Swatch("Slipping / about to come", "warn")
-    Swatch("Danger", "danger")
-    Swatch("Hostile, no threat", "hostile")
-    Swatch("Neutral", "neutral")
-    Swatch("Tapped by others", "tapped")
-    place(UI.Checkbox(p, "Threat beside the bar: your lead (or how far behind), else your %",
-        function() return db.threatText end, function(v) db.threatText = v end), 34)
-    place(UI.Help(p, "Tanking: safe while it's on you, the warning colour when someone's close to "
+    Help(p, right, "Words: |cffffd100value|r, |cffffd100max|r, |cffffd100percent|r "
+        .. "(|cffffd100percent.1|r for a decimal), |cffffd100name|r, |cffffd100level|r, |cffffd100class|r. "
+        .. "For example: value / max. Leave one empty to hide it.", 40)
+end
+
+local function BuildCasts(p)
+    local db = ns.db
+    local place, head = UI.Column(p, LEFT, COL_W)
+    head("Cast bar")
+    place(UI.Checkbox(p, "Cast bar under the bar", function() return db.castBar end,
+        function(v) db.castBar = v end), 28)
+    place(UI.Stepper(p, "Height", 4, 24, 1, function() return db.castHeight end,
+        function(v) db.castHeight = v end), 28)
+
+    head("Spell name")
+    place(UI.Stepper(p, "Size (0 = small text's)", 0, 24, 1, function() return db.castNameSize end,
+        function(v) db.castNameSize = v end), 28)
+    place(UI.Pair(p, "Nudge", { "x", -60, 60, function() return db.castNameX end, function(v) db.castNameX = v end },
+        { "y", -30, 30, function() return db.castNameY end, function(v) db.castNameY = v end }), 28)
+
+    head("Time left")
+    place(UI.Checkbox(p, "Time left on the cast", function() return db.castTime end,
+        function(v) db.castTime = v end), 28)
+    place(UI.Stepper(p, "Size (0 = small text's)", 0, 24, 1, function() return db.castTimeSize end,
+        function(v) db.castTimeSize = v end), 28, SUB)
+    place(UI.Pair(p, "Nudge", { "x", -60, 60, function() return db.castTimeX end, function(v) db.castTimeX = v end },
+        { "y", -30, 30, function() return db.castTimeY end, function(v) db.castTimeY = v end }), 28, SUB)
+
+    local right, rhead = UI.Column(p, RIGHT, COL_W)
+    rhead("Casts you can't interrupt")
+    right(UI.Checkbox(p, "In their own colour", function() return db.castColor end,
+        function(v) db.castColor = v end), 26)
+    Swatch(p, right, "Colour", "uninterruptible", SUB)
+    right(UI.Checkbox(p, "A shield beside them", function() return db.castShield end,
+        function(v) db.castShield = v end), 26)
+
+    rhead("Your debuffs")
+    right(UI.Checkbox(p, "Your debuffs above the name", function() return db.auras end,
+        function(v) db.auras = v end), 26)
+    right(UI.Checkbox(p, "All of them (off: only the ones Blizzard picks)", function() return db.allDebuffs end,
+        function(v) db.allDebuffs = v end), 26, SUB)
+    right(UI.Stepper(p, "Debuff size", 0.7, 1.4, 0.1,
+        function() return db.auraScale or tonumber(C_CVar.GetCVar("nameplateAuraScale")) or 1 end,
+        function(v) db.auraScale = v end, "%.1f"), 28, SUB)
+end
+
+local function BuildTarget(p)
+    local db = ns.db
+    local hl = db.highlight
+    local place, head = UI.Column(p, LEFT, COL_W)
+    head("Your target")
+    place(UI.Checkbox(p, "Outline", function() return hl.outline end, function(v) hl.outline = v end), 26)
+    place(UI.Checkbox(p, "Arrows either side  > bar <", function() return hl.arrows end,
+        function(v) hl.arrows = v end), 26)
+    place(UI.Checkbox(p, "Glow", function() return hl.glow end, function(v) hl.glow = v end), 28)
+    place(UI.Stepper(p, "Classic glow", 0, 1, 0.05, function() return hl.classicGlow end,
+        function(v) hl.classicGlow = v end, "%.2f"), 28)
+    place(UI.Stepper(p, "Size", 1, 1.5, 0.05, function() return hl.scale end,
+        function(v) hl.scale = v end, "%.2f"), 28)
+    Swatch(p, place, "Colour", "target")
+    place(UI.Stepper(p, "Others while targeting", 0.2, 1, 0.05, function() return db.otherAlpha end,
+        function(v) db.otherAlpha = v end, "%.2f"), 30)
+    Help(p, place, "Classic glow is the Classic look's own glow over the bar, at this opacity.", 24)
+
+    local right, rhead = UI.Column(p, RIGHT, COL_W)
+    rhead("Threat")
+    right(UI.Checkbox(p, "Colour by threat while you're on its threat list", function() return db.threat end,
+        function(v) db.threat = v end), 28)
+    right(UI.Dropdown(p, "Are you tanking?", ROLES, function() return db.role end,
+        function(v) db.role = v end), 30)
+    right(UI.Checkbox(p, "Beside the bar: your lead (or how far behind), else your %",
+        function() return db.threatText end, function(v) db.threatText = v end), 30)
+    rhead("Colours")
+    Swatch(p, right, "Safe (on you, tanking)", "safe")
+    Swatch(p, right, "Slipping / about to come", "warn")
+    Swatch(p, right, "Danger", "danger")
+    Swatch(p, right, "Hostile, no threat", "hostile")
+    Swatch(p, right, "Neutral", "neutral")
+    Swatch(p, right, "Tapped by others", "tapped")
+    Help(p, right, "Tanking: safe while it's on you, the warning colour when someone's close to "
         .. "taking it, danger once it's off you. Not tanking: the warning colour when you're about to "
-        .. "pull it, danger once it's on you. The lead compares you with your group and pets.", 440), 54)
+        .. "pull it, danger once it's on you. The lead compares you with your group and pets.", 54)
 end
 
 local function BuildExtras(p)
-    local db, c = ns.db, ns.db.colors
-    local place = UI.Placer()
-    local function Swatch(label, key)
-        place(UI.ColorSwatch(p, label, function() return c[key] end,
-            function(r, g, b) c[key] = { r = r, g = g, b = b } end), 30, 12)
-    end
-    place(UI.Label(p, "Casts you can't interrupt"), 22)
-    place(UI.Checkbox(p, "In their own colour", function() return db.castColor end,
-        function(v) db.castColor = v end), 26, 12)
-    Swatch("Colour", "uninterruptible")
-    place(UI.Checkbox(p, "A shield beside them", function() return db.castShield end,
-        function(v) db.castShield = v end), 34, 12)
-    place(UI.Label(p, "Execute range"), 22)
+    local db = ns.db
+    local place, head = UI.Column(p, LEFT, COL_W)
+    head("Execute range")
     place(UI.Checkbox(p, "Colour the bar once you can execute", function() return db.execute end,
-        function(v) db.execute = v end), 26, 12)
-    Swatch("Colour", "execute")
-    place(UI.Help(p, "Only once you know it, and in a stance that can use it: warriors' Execute (Battle "
-        .. "or Berserker Stance) and paladins' Hammer of Wrath, both below 20% health.", 420), 40, 12)
-    place(UI.Label(p, "Elites and rares"), 22)
+        function(v) db.execute = v end), 26)
+    Swatch(p, place, "Colour", "execute", SUB)
+    Help(p, place, "Only once you know it, and in a stance that can use it: warriors' Execute (Battle "
+        .. "or Berserker Stance) and paladins' Hammer of Wrath, both below 20% health.", 40)
+
+    head("Elites and rares")
     place(UI.Checkbox(p, "Dragons round the bar's end", function() return db.dragons.shown end,
-        function(v) db.dragons.shown = v end), 26, 12)
+        function(v) db.dragons.shown = v end), 26)
     place(UI.Checkbox(p, "Round both ends", function() return db.dragons.both end,
-        function(v) db.dragons.both = v end), 26, 12)
+        function(v) db.dragons.both = v end), 26, SUB)
     place(UI.Stepper(p, "Dragon size", 0.6, 1.6, 0.1, function() return db.dragons.size end,
-        function(v) db.dragons.size = v end, "%.1f"), 26, 12)
-    place(UI.Help(p, "Gold for elites (and world bosses), silver for rares, silver and winged for rare elites.",
-        420), 34, 12)
-    place(UI.Label(p, "Quests"), 22)
-    place(UI.Checkbox(p, "A \"!\" before the name of enemies your quests need", function() return db.questMarker end,
-        function(v) db.questMarker = v end), 26, 12)
-    place(UI.Checkbox(p, "Raid marks (skull, cross...) beside the bar", function() return db.raidMarks end,
-        function(v) db.raidMarks = v end), 26, 12)
-    place(UI.Stepper(p, "Raid mark size", 10, 40, 1, function() return db.markSize end,
-        function(v) db.markSize = v end), 26, 12)
+        function(v) db.dragons.size = v end, "%.1f"), 30, SUB)
+    Help(p, place, "Gold for elites (and world bosses), silver for rares, silver and winged for rare elites.", 30)
+
+    local right, rhead = UI.Column(p, RIGHT, COL_W)
+    rhead("Quests and marks")
+    right(UI.Checkbox(p, "A \"!\" before the name of enemies your quests need", function() return db.questMarker end,
+        function(v) db.questMarker = v end), 26)
+    right(UI.Checkbox(p, "Raid marks (skull, cross...) beside the bar", function() return db.raidMarks end,
+        function(v) db.raidMarks = v end), 26)
+    right(UI.Stepper(p, "Raid mark size", 10, 40, 1, function() return db.markSize end,
+        function(v) db.markSize = v end), 28, SUB)
 end
 
 function ns.ToggleConfig()
     if not ns.window then
-        ns.window = UI.Window("FrogPlatesConfig", "FrogPlates", 480, 980, {
+        ns.window = UI.Window("FrogPlatesConfig", "FrogPlates", 940, 560, {
             { "look", "Look", BuildLook },
-            { "threat", "Threat", BuildThreat },
+            { "casts", "Casts & debuffs", BuildCasts },
+            { "target", "Target & threat", BuildTarget },
             { "extras", "Extras", BuildExtras },
-        })
+        }, { tabWidth = 130 })
         return
     end
     ns.window:SetShown(not ns.window:IsShown())
