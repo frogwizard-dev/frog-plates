@@ -1,5 +1,9 @@
 # FrogPlates
 
+## 0.3.1
+
+- Runs on FrogLib's nameplate engine now, shared with the new XIVPlates (FFXIV-style nameplates). Nothing about how FrogPlates looks or works changes. Turn one of the two off: with both on, the second leaves the plates to the first and says so.
+
 ## 0.3.0
 
 - A nudge for the Classic look's level (and the skull in its place) in its box: "Classic: level nudge" under Text, right/left and up/down.

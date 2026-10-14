@@ -2,16 +2,10 @@ local _, ns = ...
 
 -- Minimal dark nameplates for enemies (hostile and neutral; friendly ones stay Blizzard's).
 --
--- Blizzard's plate keeps working underneath, made see-through (opacity 0, not hidden): clicking a
--- plate is hit-tested against its health bar, so it has to stay laid out. Ours sits on the plate's
--- base frame, over that health bar. Two of Blizzard's parts are kept, shown through the
--- see-through plate and moved round ours: its cast bar and its auras (your debuffs, and buffs you
--- can steal). Both run on Blizzard's own code, which copes with values the game keeps secret in
--- combat; ours only hands such values straight to widgets.
---
--- Blizzard pools the inner unit frames (base.UnitFrame) and gives them to any plate, friendly
--- ones too, so a unit frame we've made see-through gets its opacity back when it's next used
--- for something friendly.
+-- FrogLib's Plates engine takes the plates over (Blizzard's made see-through underneath, its cast
+-- bar and auras kept and moved round ours) and tells this skin when to build, lay out and fill in
+-- each one; XIVPlates is another skin on the same engine. Values the game keeps secret in combat
+-- only ever go straight to widgets.
 --
 -- Extras round the bar, each its own setting: casts you can't interrupt in their own colour with
 -- a small shield (following Blizzard's cast bar, which knows even when the game keeps it secret);
@@ -61,10 +55,8 @@ local function Classic() return ns.db.look == "classic" end
 local CLASSIC_COLORS = { hostile = { r = 1, g = 0, b = 0 }, neutral = { r = 1, g = 1, b = 0 },
     tapped = { r = 0.5, g = 0.5, b = 0.5 } }
 
-local own = {}    -- Blizzard unit frames we've made see-through
-local frames = {} -- plate base -> our frame
-local byUnit = {} -- nameplate unit token -> our frame
-local busy        -- our own SetAlpha, which the hook below ignores
+local Engine = FrogLib.Plates
+local BlizzardCast, OverFill, AlphaFrom = Engine.BlizzardCast, Engine.OverFill, Engine.AlphaFrom
 
 -- A path inside an add-on that isn't loaded (FrogUI's textures, without FrogUI) can't be used.
 local Usable = FrogLib.Media.Usable
@@ -80,45 +72,15 @@ local Pixel = FrogLib.Pixel
 -- Colour: threat first (when you're on its threat list), then tapped, players' class, reaction.
 ------------------------------------------------------------------------------
 
--- Tanking: from the setting, or (auto) a tanking stance, form or aura.
-local TANK_FORMS = { [18] = true, [5] = true, [8] = true } -- Defensive Stance, Bear, Dire Bear
-local RIGHTEOUS_FURY = 25780
-
-local function Tanking()
-    local role = ns.db.role
-    if role ~= "auto" then return role == "tank" end
-    local form = GetShapeshiftFormID and GetShapeshiftFormID()
-    if form and TANK_FORMS[form] then return true end
-    if C_UnitAuras and C_UnitAuras.GetPlayerAuraBySpellID then
-        local ok, aura = pcall(C_UnitAuras.GetPlayerAuraBySpellID, RIGHTEOUS_FURY)
-        if ok and aura then return true end
-    end
-    if GetSpecialization and GetSpecializationRole then
-        local spec = GetSpecialization()
-        if spec and GetSpecializationRole(spec) == "TANK" then return true end
-    end
-    return false
-end
-
 -- After threat, FrogLib.Color's rules: tapped, players' class, then neutral (or friendly) and
 -- hostile; hostile when the game won't say.
 local rules = { class = true }
 
 local function Colour(unit)
     local c = ns.db.colors
-    local situation = ns.db.threat and Safe(UnitThreatSituation("player", unit))
-    if situation then
-        -- 3: it's on you, safely; 2: on you, but someone's close; 1: someone else is about to
-        -- take it; 0: it's on someone else.
-        local t
-        if Tanking() then
-            t = (situation == 3 and c.safe) or (situation == 2 and c.warn) or c.danger
-        elseif situation >= 2 then
-            t = c.danger
-        elseif situation == 1 then
-            t = c.warn
-        end
-        if t then return t.r, t.g, t.b end
+    if ns.db.threat then
+        local r, g, b = Engine.ThreatColour(unit, c, ns.db.role)
+        if r then return r, g, b end
     end
     -- The classic look: Classic's own pure red, yellow and grey.
     if Classic() then c = CLASSIC_COLORS end
@@ -128,81 +90,10 @@ local function Colour(unit)
 end
 
 ------------------------------------------------------------------------------
--- Execute range: the bar in the execute colour once the enemy is low enough for your class's
--- execute, if you know it (any rank) and, for warriors, are in a stance that can use it.
+-- Our frame (f: the engine's frame over the plate, with f.base and f.slot)
 ------------------------------------------------------------------------------
 
-local EXECUTES = {
-    -- Execute, in Battle Stance (form 17, or the first stance) or Berserker Stance (19, the third).
-    WARRIOR = { spells = { 5308, 20658, 20660, 20661, 20662 }, below = 0.2,
-        forms = { [17] = true, [19] = true }, stances = { [1] = true, [3] = true } },
-    -- Hammer of Wrath.
-    PALADIN = { spells = { 24275, 24274, 24239 }, below = 0.2 },
-}
-
-local KNOWS = {} -- the ways this game has of asking whether you know a spell
-if C_SpellBook and C_SpellBook.IsSpellKnown then KNOWS[#KNOWS + 1] = C_SpellBook.IsSpellKnown end
-if IsPlayerSpell then KNOWS[#KNOWS + 1] = IsPlayerSpell end
-if IsSpellKnown then KNOWS[#KNOWS + 1] = IsSpellKnown end
-
-local function Knows(id)
-    for _, check in ipairs(KNOWS) do
-        local ok, known = pcall(check, id)
-        if ok and Safe(known) == true then return true end
-    end
-    return false
-end
-
-local executeBelow = false -- the health fraction your execute works under, or false (ExecuteCheck)
-
-function Plates:ExecuteCheck()
-    local _, class = UnitClass("player")
-    local e = EXECUTES[class]
-    local usable = false
-    if e then
-        for _, id in ipairs(e.spells) do
-            if Knows(id) then
-                usable = true
-                break
-            end
-        end
-        if usable and e.forms then
-            local form = GetShapeshiftFormID and GetShapeshiftFormID()
-            if form then
-                usable = e.forms[form] or false
-            else
-                local index = GetShapeshiftForm and GetShapeshiftForm()
-                usable = (index and e.stances[index]) or false
-            end
-        end
-    end
-    executeBelow = usable and e.below or false
-end
-
--- 1 under the line and 0 from it up, for the overlay's opacity (FrogLib's step curve). The game
--- evaluates it against the health fraction (UnitHealthPercent), so the answer may be secret,
--- which SetAlpha takes. nil when the client has no curves.
-local function ExecuteCurve(below)
-    if not UnitHealthPercent then return nil end
-    return FrogLib.Curve.Below(below, 1, 0)
-end
-
-------------------------------------------------------------------------------
--- Threat gap: your lead over the next highest on its threat list (or how far behind you are),
--- worked out by FrogLib's Threat.Gap and written by its SetGapText, as EnmityList's is.
-------------------------------------------------------------------------------
-
-------------------------------------------------------------------------------
--- Our frame
-------------------------------------------------------------------------------
-
-local function Create(base)
-    local f = CreateFrame("Frame", nil, base)
-    f:SetAllPoints(base)
-    f.base = base
-
-    -- Where the bar goes: centred on the plate at the health bar's height (see Layout).
-    f.slot = CreateFrame("Frame", nil, f)
+local function Create(f)
     local bar = CreateFrame("StatusBar", nil, f)
     bar:SetStatusBarTexture(WHITE)
     bar:SetMinMaxValues(0, 1)
@@ -329,31 +220,14 @@ local function Create(base)
     for _, fs in ipairs({ f.name, f.threat, f.texts.left, f.texts.center, f.texts.right }) do
         fs:SetShadowColor(0, 0, 0, 1)
     end
-
-    -- Plates move and scale smoothly, landing between screen pixels, which drops 1px edges and
-    -- blurs text: snap everything to whole pixels, as Blizzard's own plates do.
-    if PixelUtil and PixelUtil.SetRoundLayoutToNearestPixelRecursively then
-        PixelUtil.SetRoundLayoutToNearestPixelRecursively(f, true)
-    end
-    frames[base] = f
-    return f
-end
-
--- Blizzard's health bar inside the plate: ours goes over it, since that's where clicks land.
-local function BlizzardBar(uf)
-    return uf and ((uf.HealthBarsContainer and uf.HealthBarsContainer.healthBar) or uf.healthBar)
-end
-
-local function BlizzardCast(uf)
-    return uf and uf.CastBarsContainer and uf.CastBarsContainer.castBar
 end
 
 ------------------------------------------------------------------------------
 -- Casts you can't interrupt. Blizzard's cast bar already knows (the cast's notInterruptible,
--- secret for enemies in combat) and shows or hides its own shield to match (UpdateIconShown).
--- We follow that shield, handing what it's given straight to SetAlphaFromBoolean, which takes
--- secrets: our fill over Blizzard's, in the uninterruptible colour, and our small shield beside
--- the bar. Blizzard's shield is hidden on our plates (its art doesn't fit our bar).
+-- secret for enemies in combat) and shows or hides its own shield to match; the engine passes
+-- that on. Our fill over Blizzard's in the uninterruptible colour, and our small shield beside
+-- the bar, follow it (SetAlphaFromBoolean takes secrets). Blizzard's shield is hidden on our
+-- plates (its art doesn't fit our bar).
 ------------------------------------------------------------------------------
 
 -- A classic frame in three pieces round `region`, from its file's measurements (in texels):
@@ -392,9 +266,9 @@ local CLASSIC_BAR_W, CLASSIC_BAR_H = 103.75, 10
 -- and 3.5 above its bottom, 10 tall; its border lined up under the health bar's, 2 below it.
 local CAST_IN_L, CAST_IN_R, CAST_IN_T, CAST_IN_B = 20.75, 3.5, 2.5, 3.5
 local CAST_BORDER_GAP = 2
-local CAST_EXTRAS = { "Border", "CastTargetNameText", "CastTargetIndicator" }
+local CAST_EXTRAS = Engine.CAST_EXTRAS
 
-local casts = {} -- Blizzard cast bar -> our parts on it: fill, shield, and the last shield state
+local casts = {} -- Blizzard cast bar -> our parts on it: fill, shield, the classic frame and shield
 
 local function CastParts(cast)
     local x = casts[cast]
@@ -417,93 +291,16 @@ local function CastParts(cast)
     return x
 end
 
--- A texture over a status bar's fill exactly (shrinking and growing with it). It stays on the top
--- sublevel of ARTWORK, where CastParts made it: the fill's own draw layer can be secret on enemy
--- cast bars, so it isn't read.
-local function OverFill(region, bar)
-    local tex = bar:GetStatusBarTexture()
-    if not tex then return end
-    region:ClearAllPoints()
-    region:SetAllPoints(tex)
-end
-
--- Fully shown when `shown` (which may be secret) is true, hidden when it's false: the game's
--- defaults for SetAlphaFromBoolean.
-local function AlphaFrom(region, shown, on)
-    if not on then
-        region:SetAlpha(0)
-    elseif region.SetAlphaFromBoolean then
-        region:SetAlphaFromBoolean(shown)
-    elseif not issecret(shown) then
-        region:SetAlpha(shown and 1 or 0)
-    else
-        region:SetAlpha(0)
-    end
-end
-
-function Plates:CastShield(uf, cast, shown)
+function Plates:CastShield(uf, cast, shown, ours)
     local x = CastParts(cast)
-    if not issecret(shown) then shown = shown and true or false end
-    x.last, x.seen = shown, true
     local db = ns.db
-    local on = own[uf] and db.enabled and db.castBar
+    local on = ours and db.enabled and db.castBar
     if cast.BorderShield then cast.BorderShield:SetAlpha(on and 0 or 1) end
     AlphaFrom(x.fill, shown, on and db.castColor)
     local classic = Classic()
     AlphaFrom(x.shield, shown, on and db.castShield and not classic)
     x.classic:SetAlpha((on and classic) and 1 or 0)
     AlphaFrom(x.classicShield, shown, on and classic and db.castShield)
-end
-
--- Once per cast bar (they come with the pooled unit frames).
--- The time left on a cast or channel, from the game's own timer for it: its remaining time can be
--- secret in combat, so it only ever goes straight into the text. Nothing when there's no timer
--- (between casts, or an interrupted cast held in red).
-local function CastTimer(unit)
-    for _, fn in ipairs({ UnitCastingDuration, UnitChannelDuration }) do
-        local ok, d = pcall(fn, unit)
-        if ok and (issecret(d) or d ~= nil) then return d end
-    end
-end
-
-local function WriteCastTime(fs, unit)
-    local d = unit and CastTimer(unit)
-    if d then
-        fs:SetFormattedText("%.1f", d:GetRemainingDuration())
-    else
-        fs:SetText("")
-    end
-end
-
-local function HookCast(uf)
-    local cast = BlizzardCast(uf)
-    if not cast then return end
-    local x = CastParts(cast)
-    if x.hooked then return end
-    x.hooked = true
-    -- The time left (castTime), at the bar's right end, ten times a second while it shows.
-    x.time = cast:CreateFontString(nil, "OVERLAY", nil, 7)
-    x.time:SetShadowOffset(1, -1)
-    x.time:SetShadowColor(0, 0, 0, 1)
-    x.time:Hide()
-    local since = 0
-    cast:HookScript("OnUpdate", function(_, elapsed)
-        since = since + elapsed
-        if since < 0.1 or not x.time:IsShown() then return end
-        since = 0
-        if not pcall(WriteCastTime, x.time, cast.unit) then x.time:SetText("") end
-    end)
-    if cast.BorderShield and type(cast.BorderShield.SetShown) == "function" then
-        hooksecurefunc(cast.BorderShield, "SetShown", function(_, shown) Plates:CastShield(uf, cast, shown) end)
-    end
-    -- Blizzard may swap its fill texture as the cast changes state.
-    if type(cast.UpdateBarFillTexture) == "function" then
-        hooksecurefunc(cast, "UpdateBarFillTexture", function() OverFill(x.fill, cast) end)
-    end
-    -- An interrupted cast turns red, which ours mustn't cover; the next cast sets it again.
-    if type(cast.PlayInterruptAnims) == "function" then
-        hooksecurefunc(cast, "PlayInterruptAnims", function() x.fill:SetAlpha(0) end)
-    end
 end
 
 -- The black edge, and your target's ring in the target colour just outside it. Sized in screen
@@ -614,27 +411,14 @@ function Plates:PlaceClassic(f)
     local c = db.colors.target
     f.classicGlow:SetVertexColor(c.r, c.g, c.b, db.highlight.classicGlow or 0.5)
 end
-
 function Plates:Layout(f)
     local db, uf = ns.db, f.uf
-    local anchor = BlizzardBar(uf) or f.base
     local bar = f.bar
     bar:ClearAllPoints()
-    -- Centred on the plate (which the game keeps over the enemy), at the height of Blizzard's bar.
-    -- That bar starts at the plate's left but stops short on the right, for the level badge, and
-    -- nameplates can't be measured; so a slot is anchored from its top left to the top right of
-    -- the cast bar area below it (the plate's full width, evenly inset), raised by the gap
-    -- between the two: the plate's width at the health bar's height.
-    local hc, cc = uf and uf.HealthBarsContainer, uf and uf.CastBarsContainer
+    -- Centred on the plate (which the game keeps over the enemy), at the height of Blizzard's bar:
+    -- the engine's slot is the plate's width there.
+    Engine.PlaceSlot(f)
     local slot = f.slot
-    slot:ClearAllPoints()
-    if hc and cc then
-        local gap = NamePlateSetupOptions and NamePlateSetupOptions.castBarToHealthBarSpacing or 0
-        slot:SetPoint("TOPLEFT", hc, "TOPLEFT")
-        slot:SetPoint("BOTTOMRIGHT", cc, "TOPRIGHT", 0, gap)
-    else
-        slot:SetAllPoints(anchor)
-    end
     -- The classic look at Classic's own size (classicSize): its bar, and a cast bar as wide with its
     -- frame's proportions.
     local classicSize = Classic() and db.classicSize
@@ -729,17 +513,18 @@ function Plates:Layout(f)
         end
         -- The time left, in our font: inside the bar's right end in the classic look (which hides
         -- the cast's target's name there), just past it in ours (where that name stays).
-        if x.time then
-            x.time:SetShown(db.castTime and true or false)
+        local time = Engine.CastParts(cast).time
+        if time then
+            time:SetShown(db.castTime and true or false)
             -- Its own size (castTimeSize; 0: the small text's) and nudge (castTimeX, castTimeY).
             local size = (db.castTimeSize or 0) > 0 and db.castTimeSize or db.textSize
-            ns.Media:SetFont(x.time, db.font, size, db.outline)
-            x.time:ClearAllPoints()
+            ns.Media:SetFont(time, db.font, size, db.outline)
+            time:ClearAllPoints()
             local dx, dy = db.castTimeX or 0, db.castTimeY or 0
             if Classic() then
-                x.time:SetPoint("RIGHT", cast, "RIGHT", -2 + dx, dy)
+                time:SetPoint("RIGHT", cast, "RIGHT", -2 + dx, dy)
             else
-                x.time:SetPoint("LEFT", cast, "RIGHT", 3 + dx, dy)
+                time:SetPoint("LEFT", cast, "RIGHT", 3 + dx, dy)
             end
         end
         -- Blizzard's own border, the cast's target's name and its "aimed at you" outline: out of
@@ -749,50 +534,20 @@ function Plates:Layout(f)
         end
         -- Put the last shield state Blizzard set back, now the plate is ours (or the settings
         -- changed). It may be secret, so it's never tested here.
-        if x.seen then
-            self:CastShield(uf, cast, x.last)
+        local seen = Engine.CastParts(cast)
+        if seen.seen then
+            self:CastShield(uf, cast, seen.last, true)
         else
-            self:CastShield(uf, cast, false)
+            self:CastShield(uf, cast, false, true)
         end
     end
-    -- Blizzard's auras (your debuffs; buffs you can steal; crowd control), above the name.
-    local auras = uf and uf.AurasFrame
-    if auras then
-        auras:SetIgnoreParentAlpha(db.auras)
-        if db.auras then
-            -- Over the name (higher in the classic look, whose name sits above its border).
-            local up = db.nameSize + 6
-            if Classic() then up = up + 2.5 * f.barHeight / CLASSIC_BAR_H end
-            up = up * scale -- in its own (unscaled) units, over our scaled name
-            auras:ClearAllPoints()
-            auras:SetPoint("BOTTOMLEFT", bar, "TOPLEFT", 0, up)
-            auras:SetPoint("BOTTOMRIGHT", bar, "TOPRIGHT", 0, up)
-            -- Blizzard pins its rows to its own health bar and name (UpdateAnchors, after which
-            -- this runs again): pinned to ours instead. Your debuffs over the name (centred in the
-            -- classic look, as its name is; from the bar's left end in ours), stealable buffs over
-            -- its right end, crowd control and loss of control just past it.
-            local debuffs = auras.DebuffListFrame
-            if debuffs then
-                debuffs:ClearAllPoints()
-                if Classic() then
-                    debuffs:SetPoint("BOTTOM", bar, "TOP", 0, up)
-                else
-                    debuffs:SetPoint("BOTTOMLEFT", bar, "TOPLEFT", 0, up)
-                end
-            end
-            if auras.BuffListFrame then
-                auras.BuffListFrame:ClearAllPoints()
-                auras.BuffListFrame:SetPoint("BOTTOMRIGHT", bar, "TOPRIGHT", 0, up)
-            end
-            local side = (f.classicReach and Classic() and f.classicReach or 0) * scale + 5
-            for _, key in ipairs({ "CrowdControlListFrame", "LossOfControlFrame" }) do
-                if auras[key] then
-                    auras[key]:ClearAllPoints()
-                    auras[key]:SetPoint("LEFT", bar, "RIGHT", side, 0)
-                end
-            end
-        end
-    end
+    -- Blizzard's auras (your debuffs; buffs you can steal; crowd control), over the name (higher
+    -- in the classic look, whose name sits above its border; centred there, as its name is), in
+    -- their own (unscaled) units over our scaled name; crowd control just past the bar's end.
+    local up = db.nameSize + 6
+    if Classic() then up = up + 2.5 * f.barHeight / CLASSIC_BAR_H end
+    local side = (f.classicReach and Classic() and f.classicReach or 0) * scale + 5
+    Engine.PlaceAuras(uf, bar, db.auras and true or false, up * scale, Classic(), side)
 end
 
 ------------------------------------------------------------------------------
@@ -809,32 +564,16 @@ function Plates:UpdateHealth(f)
         Unit.SetText(fs, ns.db.text[slot], unit)
     end
     self:UpdateExecute(f)
-    self:UpdateDead(f)
 end
 
--- A dead enemy's plate goes (the game can keep the plate itself for a while).
-function Plates:UpdateDead(f)
-    f:SetShown(Safe(UnitIsDead(f.unit)) ~= true)
-end
-
--- The execute overlay's opacity: from the game's curve where it has one (health may be secret),
--- otherwise worked out here while health isn't secret.
+-- The execute overlay: the engine's 1 under your execute's line, 0 above (may be secret).
 function Plates:UpdateExecute(f)
-    local below = ns.db.execute and executeBelow
+    local below = ns.db.execute and Engine.ExecuteBelow()
     if not below then
         f.execute:Hide()
         return
     end
-    local alpha = 0
-    local curve = ExecuteCurve(below)
-    if curve then
-        local a = FrogLib.Curve.Health(f.unit, curve)
-        if issecret(a) or a ~= nil then alpha = a end
-    else
-        local h, m = Safe(UnitHealth(f.unit)), Safe(UnitHealthMax(f.unit))
-        if h and m and m > 0 and h / m < below then alpha = 1 end
-    end
-    f.execute:SetAlpha(alpha)
+    f.execute:SetAlpha(Engine.ExecuteAlpha(f.unit, below))
     f.execute:Show()
 end
 
@@ -863,45 +602,11 @@ function Plates:UpdateDragon(f)
     self:PlaceSides(f)
 end
 
-------------------------------------------------------------------------------
--- Quest marker: whether your quests still need this enemy. The unit's tooltip, as the game builds
--- it, lists your objectives for it with whether each is done; failing that (no objective lines, or
--- the game withholding the tooltip), the game's own C_QuestLog.UnitIsRelatedToActiveQuest.
-------------------------------------------------------------------------------
-
-local QUEST_LINE = Enum.TooltipDataLineType and Enum.TooltipDataLineType.QuestObjective
-
--- The unit's quest objective lines, and how many aren't done; nothing if the game won't say.
-local function QuestLines(unit)
-    if not (QUEST_LINE and C_TooltipInfo and C_TooltipInfo.GetUnit) then return end
-    local data = Safe(C_TooltipInfo.GetUnit(unit))
-    local lines = type(data) == "table" and Safe(data.lines)
-    if type(lines) ~= "table" then return end
-    local total, open = 0, 0
-    for _, line in ipairs(lines) do
-        if type(line) == "table" and Safe(line.type) == QUEST_LINE then
-            total = total + 1
-            if Safe(line.completed) ~= true then open = open + 1 end
-        end
-    end
-    return total, open
-end
-
-local function OnQuest(unit)
-    if Safe(UnitIsPlayer(unit)) ~= false then return false end
-    local ok, total, open = pcall(QuestLines, unit)
-    if ok and total and total > 0 then return open > 0 end
-    if C_QuestLog and C_QuestLog.UnitIsRelatedToActiveQuest then
-        local ok2, related = pcall(C_QuestLog.UnitIsRelatedToActiveQuest, unit)
-        return ok2 and Safe(related) == true
-    end
-    return false
-end
-
--- The "!" sits just before the name, which moves along to make room for it.
+-- The "!" sits just before the name, which moves along to make room for it (the engine's
+-- OnQuest says whether your quests still need this enemy).
 function Plates:UpdateQuest(f)
     local db = ns.db
-    local shown = db.questMarker and OnQuest(f.unit) or false
+    local shown = db.questMarker and Engine.OnQuest(f.unit) or false
     local q = db.nameSize + 4
     f.quest:SetSize(q, q)
     f.quest:ClearAllPoints()
@@ -959,38 +664,10 @@ function Plates:UpdateColour(f)
     f.bar:SetStatusBarColor(Colour(f.unit))
 end
 
-local STATUS = {
-    [1] = { "Pulling!", "danger" },
-    [2] = { "Slipping", "danger" },
-    [3] = { "Tanking", "safe" },
-}
-
 function Plates:UpdateThreat(f)
-    local unit, db = f.unit, ns.db
-    local situation = Safe(UnitThreatSituation("player", unit))
-    if not (db.threatText and situation ~= nil) then
-        f.threat:Hide()
-        return
-    end
-    f.threat:Show()
-    self:NoteThreat(unit)
-    local gap = Threat.Gap(unit)
-    local c = db.colors
-    if gap then
-        Threat.SetGapText(f.threat, gap, c.safe, c.danger)
-    elseif situation >= 1 then
-        -- The numbers are hidden (in dungeons the game keeps them from addons), so no lead: the
-        -- game's own verdict instead. 3: it's on you and staying; 2: it's on you but someone has
-        -- more and it's about to go; 1: it's on someone else but you have more, it's coming to you.
-        local word, col = STATUS[situation][1], STATUS[situation][2] == "safe" and c.safe or c.danger
-        f.threat:SetTextColor(col.r, col.g, col.b)
-        f.threat:SetText(word)
-    else
-        -- Not on you: your threat as a share of what would pull it (may be secret).
-        local _, _, percent = UnitDetailedThreatSituation("player", unit)
-        f.threat:SetTextColor(1, 1, 1)
-        pcall(f.threat.SetFormattedText, f.threat, "%d%%", percent)
-    end
+    local db = ns.db
+    local shown = db.threatText and Engine.ThreatText(f.threat, f.unit, db.colors)
+    f.threat:SetShown(shown and true or false)
 end
 
 -- Which mark a unit has can be secret in combat, so the number is never looked at: FrogLib.Icons
@@ -1003,259 +680,105 @@ end
 
 function Plates:UpdateTarget()
     local target = C_NamePlate.GetNamePlateForUnit("target")
-    for base, f in pairs(frames) do
-        if f.unit then
-            local isTarget = target == base
-            local hl = ns.db.highlight
-            -- The classic look's own target glow over the bar, for either the outline or the glow.
-            local classic = Classic()
-            f.ringBorder:SetShown(isTarget and hl.outline and not classic)
-            f.glow:SetShown(isTarget and hl.glow and not classic)
-            f.classicGlow:SetShown(isTarget and classic and (hl.outline or hl.glow))
-            local arrows = isTarget and hl.arrows
-            if arrows ~= f.arrows:IsShown() then
-                f.arrows:SetShown(arrows)
-                if arrows then f.arrows.pulse:Play() else f.arrows.pulse:Stop() end
-            end
-            self:PlaceSides(f)
-            f:SetScale((isTarget and hl.scale or 1) * (ns.db.scale or 1))
-            f:SetAlpha((target and not isTarget) and ns.db.otherAlpha or 1)
+    Engine.Each(function(f)
+        local isTarget = target == f.base
+        local hl = ns.db.highlight
+        -- The classic look's own target glow over the bar, for either the outline or the glow.
+        local classic = Classic()
+        f.ringBorder:SetShown(isTarget and hl.outline and not classic)
+        f.glow:SetShown(isTarget and hl.glow and not classic)
+        f.classicGlow:SetShown(isTarget and classic and (hl.outline or hl.glow))
+        local arrows = isTarget and hl.arrows
+        if arrows ~= f.arrows:IsShown() then
+            f.arrows:SetShown(arrows)
+            if arrows then f.arrows.pulse:Play() else f.arrows.pulse:Stop() end
         end
-    end
-end
-
-function Plates:UpdateAll(f)
-    self:UpdateHealth(f)
-    self:UpdateName(f)
-    self:UpdateColour(f)
-    self:UpdateThreat(f)
-    self:UpdateMark(f)
-    self:UpdateDragon(f)
-    self:UpdateQuest(f)
-end
-
--- Quest progress comes in bursts of events: look again once they settle.
-local questPending
-function Plates:QuestsChanged()
-    if questPending then return end
-    questPending = true
-    C_Timer.After(0.3, function()
-        questPending = nil
-        for _, f in pairs(byUnit) do Plates:UpdateQuest(f) end
+        self:PlaceSides(f)
+        f:SetScale((isTarget and hl.scale or 1) * (ns.db.scale or 1))
+        f:SetAlpha((target and not isTarget) and ns.db.otherAlpha or 1)
     end)
 end
 
 ------------------------------------------------------------------------------
--- Taking plates over, and giving them back
+-- The skin the engine drives
 ------------------------------------------------------------------------------
 
-local function SeeThrough(uf, on)
-    busy = true
-    uf:SetAlpha(on and 0 or 1)
-    busy = false
-    if uf.selectionHighlight then uf.selectionHighlight:SetAlpha(on and 0 or 0.25) end
-    if not on then
-        local cast = BlizzardCast(uf)
-        if cast then
-            cast:SetIgnoreParentAlpha(false)
-            -- Blizzard's shield and border back, ours away.
-            if cast.BorderShield then cast.BorderShield:SetAlpha(1) end
-            for _, key in ipairs(CAST_EXTRAS) do
-                if cast[key] then cast[key]:SetAlpha(1) end
-            end
-            local x = casts[cast]
-            if x then
-                x.fill:SetAlpha(0)
-                x.shield:SetAlpha(0)
-                if x.time then x.time:Hide() end
-                x.classic:SetAlpha(0)
-                x.classicShield:SetAlpha(0)
-            end
+local UPDATES = {
+    all = function(f)
+        Plates:UpdateHealth(f)
+        Plates:UpdateName(f)
+        Plates:UpdateColour(f)
+        Plates:UpdateThreat(f)
+        Plates:UpdateMark(f)
+        Plates:UpdateDragon(f)
+        Plates:UpdateQuest(f)
+    end,
+    health = function(f) Plates:UpdateHealth(f) end,
+    name = function(f) Plates:UpdateName(f) end,
+    class = function(f)
+        Plates:UpdateName(f)
+        Plates:UpdateDragon(f)
+    end,
+    threat = function(f)
+        Plates:UpdateColour(f)
+        Plates:UpdateThreat(f)
+    end,
+    mark = function(f) Plates:UpdateMark(f) end,
+    quest = function(f) Plates:UpdateQuest(f) end,
+    execute = function(f)
+        Plates:UpdateColour(f)
+        Plates:UpdateExecute(f)
+    end,
+}
+
+local skin = {
+    owner = "FrogPlates",
+    enabled = function() return ns.db.enabled end,
+    create = Create,
+    layout = function(f) Plates:Layout(f) end,
+    update = function(f, what)
+        local fn = UPDATES[what]
+        if fn then fn(f) end
+    end,
+    target = function() Plates:UpdateTarget() end,
+    -- The borders are sized in screen pixels: placed again when the plate's scale changes (it
+    -- grows as enemies come closer).
+    tick = function(f)
+        if f:GetEffectiveScale() ~= f.placedScale then Plates:PlaceBorders(f) end
+    end,
+    castShield = function(uf, cast, shown, ours) Plates:CastShield(uf, cast, shown, ours) end,
+    -- Blizzard may swap its fill texture as the cast changes state.
+    castFill = function(cast) OverFill(CastParts(cast).fill, cast) end,
+    -- An interrupted cast turns red, which ours mustn't cover; the next cast sets it again.
+    castInterrupted = function(cast) CastParts(cast).fill:SetAlpha(0) end,
+    release = function(_, cast)
+        local x = casts[cast]
+        if x then
+            x.fill:SetAlpha(0)
+            x.shield:SetAlpha(0)
+            x.classic:SetAlpha(0)
+            x.classicShield:SetAlpha(0)
         end
-        if uf.AurasFrame then uf.AurasFrame:SetIgnoreParentAlpha(false) end
-    end
-end
-
--- Once per unit frame: keep it see-through while it's ours, and put our layout back after
--- Blizzard re-lays it out (a new unit, or a nameplate setting changed).
-local hooked = {}
-local function Hook(uf)
-    if hooked[uf] then return end
-    hooked[uf] = true
-    hooksecurefunc(uf, "SetAlpha", function(self, alpha)
-        if busy or not own[self] then return end
-        if issecret(alpha) or alpha ~= 0 then
-            busy = true
-            self:SetAlpha(0)
-            busy = false
-        end
-    end)
-    local function Relayout(self)
-        local f = own[self] and frames[self:GetParent()]
-        if f and f.uf == self then Plates:Layout(f) end
-    end
-    for _, method in ipairs({ "ApplyFrameOptions", "UpdateAnchors" }) do
-        if type(uf[method]) == "function" then hooksecurefunc(uf, method, Relayout) end
-    end
-    HookCast(uf)
-end
-
-local function Release(uf)
-    if uf and own[uf] then
-        own[uf] = nil
-        SeeThrough(uf, false)
-    end
-end
-
-function Plates:Add(unit)
-    local base = C_NamePlate.GetNamePlateForUnit(unit)
-    if not base or base:IsForbidden() then return end
-    local uf = base.UnitFrame
-    local enemy = ns.db.enabled and Safe(UnitCanAttack("player", unit)) and Safe(UnitIsUnit(unit, "player")) == false
-    if not enemy then
-        Release(uf)
-        if frames[base] then frames[base]:Hide() end
-        return
-    end
-    if uf then
-        own[uf] = true
-        Hook(uf)
-        SeeThrough(uf, true)
-    end
-    local f = frames[base] or Create(base)
-    f.unit, f.uf = unit, uf
-    byUnit[unit] = f
-    self:Layout(f)
-    self:UpdateAll(f)
-    f:Show()
-    self:UpdateDead(f)
-    self:UpdateTarget()
-end
-
-function Plates:Remove(unit)
-    local f = byUnit[unit]
-    if not f then return end
-    byUnit[unit] = nil
-    f.unit = nil
-    f:Hide()
-end
-
--- Blizzard's aura row (which ours moves) shows only the debuffs on its own list unless the
--- game's "show all personal auras" setting is on, and only if the enemy aura setting includes
--- debuffs; both are game settings, set here from ours (out of combat: settings can't change in it).
-function Plates:AuraSettings()
-    local db = ns.db
-    if not (db.enabled and db.auras) or InCombatLockdown() then return end
-    -- Their size: the game's own debuff scale, which also decides how many fit on a row.
-    if db.auraScale and C_CVar.GetCVar("nameplateAuraScale") then
-        SetCVar("nameplateAuraScale", string.format("%.2f", db.auraScale))
-    end
-    if C_CVar.GetCVar("nameplateShowAllPersonalAuras") then
-        SetCVar("nameplateShowAllPersonalAuras", db.allDebuffs and "1" or "0")
-    end
-    if C_CVar.SetCVarBitfield then
-        if Enum.NamePlateEnemyNpcAuraDisplay and C_CVar.GetCVar("nameplateEnemyNpcAuraDisplay") then
-            pcall(C_CVar.SetCVarBitfield, "nameplateEnemyNpcAuraDisplay", Enum.NamePlateEnemyNpcAuraDisplay.Debuffs, true)
-        end
-        if Enum.NamePlateEnemyPlayerAuraDisplay and C_CVar.GetCVar("nameplateEnemyPlayerAuraDisplay") then
-            pcall(C_CVar.SetCVarBitfield, "nameplateEnemyPlayerAuraDisplay", Enum.NamePlateEnemyPlayerAuraDisplay.Debuffs, true)
-        end
-    end
-end
+    end,
+}
 
 -- Every plate again (after a settings change, or turning it on or off).
 function Plates:Refresh()
-    self:AuraSettings()
-    self:ExecuteCheck()
-    for unit in pairs(byUnit) do self:Remove(unit) end
-    for i = 1, 40 do
-        local unit = "nameplate" .. i
-        if UnitExists(unit) then self:Add(unit) end
-    end
-end
-
--- The last snapshot of your target taken in combat, so /fp threat can show it after the fight.
-local lastSeen, lastSeenAt = nil, 0
-
-function Plates:NoteThreat(unit)
-    if not (Safe(UnitAffectingCombat("player")) and Safe(UnitIsUnit(unit, "target"))) then return end
-    local now = GetTime()
-    if now - lastSeenAt < 1 then return end
-    lastSeenAt = now
-    lastSeen = Threat.Snapshot(unit)
+    local db = ns.db
+    Engine.AuraSettings({ auras = db.enabled and db.auras, allDebuffs = db.allDebuffs, auraScale = db.auraScale })
+    Engine.Refresh()
 end
 
 -- /fp threat: live while you're fighting your target, otherwise the last fight's snapshot.
 function Plates:ThreatReport()
-    local live = UnitExists("target") and Safe(UnitAffectingCombat("player"))
-    local lines = live and Threat.Snapshot("target") or lastSeen
-    if not lines then
-        ns.Print("nothing seen yet: fight something with it targeted, then try again.")
-        return
-    end
-    ns.Print(live and "threat now:" or string.format("threat as last seen in combat (%ds ago):", math.floor(GetTime() - lastSeenAt)))
-    for _, line in ipairs(lines) do print(line) end
+    Engine.ThreatReport(ns.Print)
 end
 
 function Plates:Init()
-    hooksecurefunc(NamePlateDriverFrame, "OnNamePlateAdded", function(_, unit) Plates:Add(unit) end)
-    hooksecurefunc(NamePlateDriverFrame, "OnNamePlateRemoved", function(_, unit) Plates:Remove(unit) end)
-
-    local ev = CreateFrame("Frame")
-    for _, event in ipairs({ "UNIT_HEALTH", "UNIT_MAXHEALTH", "UNIT_NAME_UPDATE", "UNIT_LEVEL", "UNIT_FACTION",
-        "UNIT_FLAGS", "UNIT_THREAT_SITUATION_UPDATE", "UNIT_THREAT_LIST_UPDATE", "PLAYER_TARGET_CHANGED",
-        "RAID_TARGET_UPDATE", "UPDATE_SHAPESHIFT_FORM", "PLAYER_REGEN_ENABLED", "SPELLS_CHANGED",
-        "UNIT_CLASSIFICATION_CHANGED", "QUEST_LOG_UPDATE", "QUEST_ACCEPTED", "QUEST_REMOVED",
-        "QUEST_TURNED_IN", "QUEST_WATCH_UPDATE" }) do
-        pcall(ev.RegisterEvent, ev, event)
+    local ok, other = Engine.Register(skin)
+    if not ok then
+        ns.Print(other .. " is already styling the nameplates; turn one of the two off.")
+        return
     end
-    pcall(ev.RegisterUnitEvent, ev, "UNIT_QUEST_LOG_CHANGED", "player")
-    ev:SetScript("OnEvent", function(_, event, unit)
-        if event == "PLAYER_TARGET_CHANGED" then
-            Plates:UpdateTarget()
-            return
-        elseif event == "RAID_TARGET_UPDATE" then
-            for _, f in pairs(byUnit) do Plates:UpdateMark(f) end
-            return
-        elseif event == "UPDATE_SHAPESHIFT_FORM" or event == "PLAYER_REGEN_ENABLED" or event == "SPELLS_CHANGED" then
-            -- A new stance or spell can change your execute too.
-            Plates:ExecuteCheck()
-            for _, f in pairs(byUnit) do
-                Plates:UpdateColour(f)
-                Plates:UpdateExecute(f)
-            end
-            return
-        elseif event:match("^QUEST_") or event == "UNIT_QUEST_LOG_CHANGED" then
-            Plates:QuestsChanged()
-            return
-        end
-        local f = unit and byUnit[unit]
-        if not f then return end
-        if event == "UNIT_HEALTH" or event == "UNIT_MAXHEALTH" then
-            Plates:UpdateHealth(f)
-        elseif event == "UNIT_NAME_UPDATE" or event == "UNIT_LEVEL" then
-            Plates:UpdateName(f)
-        elseif event == "UNIT_CLASSIFICATION_CHANGED" then
-            Plates:UpdateName(f)
-            Plates:UpdateDragon(f)
-        else
-            Plates:UpdateColour(f)
-            Plates:UpdateThreat(f)
-        end
-    end)
-    -- The threat gap drifts with every hit, without its own event for each plate.
-    local elapsed = 0
-    ev:SetScript("OnUpdate", function(_, dt)
-        for _, f in pairs(byUnit) do
-            if f:GetEffectiveScale() ~= f.placedScale then Plates:PlaceBorders(f) end
-        end
-        elapsed = elapsed + dt
-        if elapsed < 0.3 then return end
-        elapsed = 0
-        for _, f in pairs(byUnit) do
-            Plates:UpdateColour(f)
-            Plates:UpdateThreat(f)
-        end
-    end)
     self:Refresh()
 end
