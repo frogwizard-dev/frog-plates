@@ -1,5 +1,9 @@
 # FrogPlates
 
+## 0.3.2
+
+- A little more room between the quest "!" and the name.
+
 ## 0.3.1
 
 - Runs on FrogLib's nameplate engine now, shared with the new XIVPlates (FFXIV-style nameplates). Nothing about how FrogPlates looks or works changes. Turn one of the two off: with both on, the second leaves the plates to the first and says so.

@@ -615,8 +615,8 @@ function Plates:UpdateQuest(f)
     if Classic() then
         local k = (f.barHeight or db.height) / CLASSIC_BAR_H
         f.name:ClearAllPoints()
-        f.name:SetPoint("BOTTOM", f.bar, "TOP", shown and math.floor(q * 0.25 + 0.5) or 0, 2.5 * k + 2)
-        f.quest:SetPoint("RIGHT", f.name, "LEFT", math.floor(q * 0.3 + 0.5), 0)
+        f.name:SetPoint("BOTTOM", f.bar, "TOP", shown and math.floor(q * 0.4 + 0.5) or 0, 2.5 * k + 2)
+        f.quest:SetPoint("RIGHT", f.name, "LEFT", 2, 0)
         f.quest:SetShown(shown)
         return
     end
@@ -624,7 +624,7 @@ function Plates:UpdateQuest(f)
     f.quest:SetPoint("BOTTOMLEFT", f.bar, "TOPLEFT", -math.floor(q * 0.3 + 0.5), 1)
     f.quest:SetShown(shown)
     f.name:ClearAllPoints()
-    f.name:SetPoint("BOTTOMLEFT", f.bar, "TOPLEFT", shown and math.floor(q * 0.45 + 0.5) or 0, 3)
+    f.name:SetPoint("BOTTOMLEFT", f.bar, "TOPLEFT", shown and math.floor(q * 0.7 + 0.5) or 0, 3)
     f.name:SetPoint("BOTTOMRIGHT", f.bar, "TOPRIGHT", 0, 3)
 end
 
