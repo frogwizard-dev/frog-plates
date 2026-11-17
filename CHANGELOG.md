@@ -1,5 +1,14 @@
 # FrogPlates
 
+## 0.3.3
+
+- Nothing runs every frame for the borders any more: the pixel edges and the Forever border stay on whole screen pixels however the plate grows, without being placed again.
+- A plate coming up looks at its own target state only; picking a target whose plate isn't up yet dims the other plates once it shows.
+- Names in Russian, Korean or Chinese draw in every font.
+- Your target's lead shows in numbers again (threat reads as secret through a plate).
+- Mobs that turn hostile after their plate shows, duels and PvP flags get the right plate; the quest mark is for your own objectives only; no threat colours while you play alone as a damage dealer; paladins stay in tank colours through a fight.
+- Shared code (FrogLib 1.12.0): see its notes for the rest of what's fixed.
+
 ## 0.3.2
 
 - A little more room between the quest "!" and the name.
@@ -11,7 +20,7 @@
 ## 0.3.0
 
 - A nudge for the Classic look's level (and the skull in its place) in its box: "Classic: level nudge" under Text, right/left and up/down.
-- Your debuffs sit over the plate (centred in the Classic look, from the bar's left end in ours), and crowd control just past its right end: Blizzard pins them to its own hidden bar and name, which put them off to one side.
+- Your debuffs sit over the plate (centred in the Classic look, from the bar's left end in ours), and crowd control right past its right end: Blizzard pins them to its own hidden bar and name, which put them off to one side.
 - The time left on an enemy's cast or channel, on its cast bar (from the game's own timer, so it shows even when the game keeps cast times hidden in combat). On by default; "Time left on the cast" under the cast bar settings, with its own size and nudge. The spell's name on the cast bar in your font and outline, with its own size and nudge too.
 - Font outline: a new "Drop shadow" choice, no outline but a soft black shadow under the text (FrogLib's).
 - A dead enemy's plate goes straight away (it could stay up while the game kept the plate).
